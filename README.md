@@ -2,6 +2,16 @@
 
 A Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that auto-approves safe Bash commands and blocks dangerous ones. Written in Go for fast startup.
 
+## Quick install
+
+```bash
+git clone https://github.com/mariusvniekerk/claude-bash-approve.git
+cd claude-bash-approve
+./install.sh
+```
+
+This builds the binary, creates `~/.claude/settings.json` if it doesn't exist, and adds the hook. If `settings.json` already exists, it prints the config snippet to add manually — or pass `--force` to merge it in (requires `jq`; backs up the original first).
+
 ## How it works
 
 When Claude Code is about to run a Bash command, this hook intercepts it and makes one of three decisions:
@@ -34,16 +44,6 @@ The hook uses a compositional model: a command is split into **wrappers** (prefi
 
 - Go 1.25+
 - Claude Code
-
-### Quick install
-
-```bash
-git clone https://github.com/mariusvniekerk/claude-bash-approve.git
-cd claude-bash-approve
-./install.sh
-```
-
-This builds the binary, creates `~/.claude/settings.json` if it doesn't exist, and adds the hook. If `settings.json` already exists, it prints the config snippet to add manually — or pass `--force` to merge it in (requires `jq`; backs up the original first).
 
 ### Manual setup
 
