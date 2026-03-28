@@ -2,15 +2,13 @@
 
 A Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that auto-approves safe Bash commands and blocks dangerous ones. Written in Go for fast startup.
 
-## Quick install
+## Install
 
-```bash
-git clone https://github.com/mariusvniekerk/claude-bash-approve.git
-cd claude-bash-approve
-./install.sh
+```
+/plugin install github:mariusvniekerk/claude-bash-approve
 ```
 
-This builds the binary, creates `~/.claude/settings.json` if it doesn't exist, and adds the hook. If `settings.json` already exists, it prints the config snippet to add manually — or pass `--force` to merge it in (requires `jq`; backs up the original first).
+That's it. The hook registers automatically and the Go binary compiles on first use. Requires Go 1.25+.
 
 ## How it works
 
@@ -42,26 +40,19 @@ Commands are parsed into an AST (using [mvdan/sh](https://github.com/mvdan/sh)) 
 
 The hook uses a compositional model: a command is split into **wrappers** (prefixes like `timeout 30`, `env`, `VAR=val`) and a **core command** (like `git status`, `pytest`). Both are matched against regex patterns organized into categories.
 
-## Installation
+## Alternative installation
 
-### Prerequisites
+### install.sh
 
-- Go 1.25+
-- Claude Code
-
-### As a plugin
-
-Install directly from GitHub:
-
-```
-/plugin install github:mariusvniekerk/claude-bash-approve
+```bash
+git clone https://github.com/mariusvniekerk/claude-bash-approve.git
+cd claude-bash-approve
+./install.sh
 ```
 
-The hook registers automatically — no manual settings.json editing needed. The Go binary compiles on first use.
+Builds the binary, creates `~/.claude/settings.json` if needed, and adds the hook. Pass `--force` to merge into an existing settings file (requires `jq`).
 
 ### Manual setup
-
-If you prefer not to use the plugin system:
 
 1. Clone this repo:
 
