@@ -7,6 +7,8 @@ description: Use when analyzing bash-approve hook decisions, finding commands th
 
 Query the bash-approve hook's decision log to find approval candidates and analyze command patterns.
 
+**If arguments are provided** (e.g. `/bash-approve-telemetry kubectl`), filter all queries to commands matching that argument using `WHERE command LIKE '%<arg>%'`. Focus analysis on that command family rather than showing all decisions.
+
 ## Database Location
 
 ```
