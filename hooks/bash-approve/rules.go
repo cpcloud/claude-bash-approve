@@ -18,7 +18,7 @@ func (p pattern) label() string { return p.tags[0] }
 
 type patternOption func(*pattern)
 
-// WithDecision overrides the default "allow" decision (e.g. "" to fall through to ask).
+// WithDecision overrides the default "allow" decision (e.g. "ask", "deny").
 func WithDecision(decision string) patternOption {
 	return func(p *pattern) {
 		p.decision = decision
@@ -52,6 +52,7 @@ var allWrapperPatterns = []pattern{
 	NewPattern(`^bundle\s+exec\s+`, tags("bundle exec", "wrapper")),
 	NewPattern(`^rtk\s+proxy\s+`, tags("rtk proxy", "wrapper")),
 	NewPattern(`^command\s+`, tags("command", "wrapper")),
+	NewPattern(`^(\.\./)*node_modules/\.bin/`, tags("node_modules/.bin", "wrapper")),
 	NewPattern(`^/[^\s]+/`, tags("absolute path", "wrapper")),
 }
 
@@ -69,7 +70,8 @@ var allCommandPatterns = []pattern{
 		WithDenyReason("BLOCKED: blanket git checkout is banned. Restore specific files only.")),
 	NewPattern(`^git\s+(-C\s+\S+\s+)?clean\s+-[a-zA-Z]*f`, tags("git clean -f", "git destructive", "git"), WithDecision("deny"),
 		WithDenyReason("BLOCKED: git clean -f is banned. Remove specific files only.")),
-	NewPattern(`^git\s+(-C\s+\S+\s+)?(add|checkout|commit|merge|pull|rebase|switch|remote|config|rerere)\b`, tags("git write op", "git")),
+	NewPattern(`^git\s+(-C\s+\S+\s+)?(add|checkout|cherry-pick|commit|merge|pull|rebase|switch|remote|config|rerere|worktree)\b`, tags("git write op", "git")),
+	NewPattern(`^git\s+(-C\s+\S+\s+)?tag\b`, tags("git tag", "git"), WithDecision("ask")),
 	NewPattern(`^git\s+(-C\s+\S+\s+)?push\b`, tags("git push", "git"), WithDecision("")),
 
 	// jj (Jujutsu)
@@ -84,7 +86,7 @@ var allCommandPatterns = []pattern{
 	NewPattern(`^pytest\b`, tags("pytest", "python")),
 	NewPattern(`^python3?\b`, tags("python")),
 	NewPattern(`^ruff\b`, tags("ruff", "python")),
-	NewPattern(`^uv\s+(pip|run|sync|venv|add|remove|lock)\b`, tags("uv", "python")),
+	NewPattern(`^uv\s+(pip|run|sync|venv|add|remove|lock|tool)\b`, tags("uv", "python")),
 	NewPattern(`^uvx\b`, tags("uvx", "python")),
 
 	// node
@@ -93,6 +95,7 @@ var allCommandPatterns = []pattern{
 	NewPattern(`^node\s+-[ep]\b`, tags("node -e", "node")),
 	NewPattern(`^bun\s+(install|run|test|build|add|remove)\b`, tags("bun", "node")),
 	NewPattern(`^bunx\b`, tags("bunx", "node")),
+	NewPattern(`^vitest\b`, tags("vitest", "node")),
 
 	// rust
 	NewPattern(`^cargo\s+(build|test|run|check|clippy|fmt|clean)\b`, tags("cargo", "rust")),
@@ -104,6 +107,8 @@ var allCommandPatterns = []pattern{
 	NewPattern(`^mise\s+approve\b`, tags("mise")),
 
 	// shell
+	NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: rm -r is banned. Remove specific files only, not entire directory trees.")),
 	NewPattern(`^(ls|cat|head|tail|wc|find|grep|rg|file|which|pwd|du|df|curl|sort|uniq|cut|tr|awk|sed|xargs|xxd|od|hexdump|sqlite3|tee|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env)\b`, tags("read-only", "shell")),
 	NewPattern(`^touch\b`, tags("touch", "shell")),
 	NewPattern(`^mkdir\b`, tags("mkdir", "shell")),
@@ -118,6 +123,12 @@ var allCommandPatterns = []pattern{
 	NewPattern(`^(source|\.) `, tags("source", "shell")),
 	NewPattern(`^sleep\s`, tags("sleep", "shell")),
 	NewPattern(`^[A-Z_][A-Z0-9_]*=\S*$`, tags("var assignment", "shell")),
+
+	// linters / static analysis
+	NewPattern(`^shellcheck\b`, tags("shellcheck")),
+
+	// grpc
+	NewPattern(`^grpcurl\b`, tags("grpcurl")),
 
 	// brew
 	NewPattern(`^brew\s+(install|list|info|search|tap|untap|update|upgrade|outdated|deps|doctor|config|--version)\b`, tags("brew")),
@@ -147,6 +158,15 @@ var allCommandPatterns = []pattern{
 	NewPattern(`^gcloud\s+auth\s+print-access-token\b`, tags("gcloud auth", "gcloud")),
 	NewPattern(`^gcloud\s+config\s+(list|get-value)\b`, tags("gcloud config", "gcloud")),
 	NewPattern(`^gcloud\s+projects\s+(list|describe)\b`, tags("gcloud projects", "gcloud")),
+
+	// kubectl (global flags like --context, -n can appear before or after the subcommand)
+	NewPattern(`^kubectl\s+.*\b(get|describe|logs|top|version|config|cluster-info|api-resources|api-versions|explain|auth)\b`, tags("kubectl read op", "kubectl")),
+	NewPattern(`^kubectl\s+.*\b(apply|create|delete|patch|edit|scale|label|annotate|taint|cordon|uncordon|drain)\b`, tags("kubectl write op", "kubectl")),
+	NewPattern(`^kubectl\s+.*\brollout\s+(status|history)\b`, tags("kubectl read op", "kubectl")),
+	NewPattern(`^kubectl\s+.*\brollout\s+(restart|undo|pause|resume)\b`, tags("kubectl write op", "kubectl")),
+	NewPattern(`^kubectl\s+.*\bport-forward\b`, tags("kubectl port-forward", "kubectl")),
+	NewPattern(`^kubectl\s+.*\bexec\b`, tags("kubectl exec", "kubectl")),
+	NewPattern(`^kubectl\s+.*\bcp\b`, tags("kubectl cp", "kubectl")),
 
 	// bq (BigQuery)
 	NewPattern(`^bq\s+(ls|show|query|head|get-iam-policy|version|help)\b`, tags("bq")),

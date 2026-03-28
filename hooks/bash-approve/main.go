@@ -52,7 +52,7 @@ type HookDecision struct {
 const (
 	decisionAllow = "allow"
 	decisionDeny  = "deny"
-	decisionAsk   = "" // no opinion, fall through to Claude Code's permission prompt
+	decisionAsk   = "ask" // prompts the user to confirm execution
 )
 
 // Well-known tag names used in matching logic.
@@ -227,7 +227,8 @@ func checkSubstitutions(node syntax.Node, wrapperPats, commandPats []pattern) bo
 		}
 		if stmts != nil {
 			for _, stmt := range stmts {
-				if evaluateStmt(stmt, wrapperPats, commandPats) == nil {
+				r := evaluateStmt(stmt, wrapperPats, commandPats)
+				if r == nil || r.decision == decisionDeny {
 					safe = false
 					return false
 				}
@@ -293,28 +294,36 @@ func mergeStmtResults(stmts []*syntax.Stmt, wrapperPats, commandPats []pattern) 
 	var firstDenyReason string
 	askDecision := false
 	denyDecision := false
+	noOpinion := false
 	for _, stmt := range stmts {
 		r := evaluateStmt(stmt, wrapperPats, commandPats)
 		if r == nil {
 			return nil
 		}
 		reasons = append(reasons, r.reason)
-		if r.decision == decisionAsk {
-			askDecision = true
-		}
-		if r.decision == decisionDeny {
+		switch r.decision {
+		case decisionDeny:
 			denyDecision = true
 			if firstDenyReason == "" && r.denyReason != "" {
 				firstDenyReason = r.denyReason
 			}
+		case decisionAsk:
+			askDecision = true
+		case decisionAllow:
+			// no change
+		default:
+			noOpinion = true
 		}
 	}
 	out := approved(strings.Join(reasons, " | "))
+	// Priority: deny > ask > no-opinion > allow
 	if denyDecision {
 		out.decision = decisionDeny
 		out.denyReason = firstDenyReason
 	} else if askDecision {
 		out.decision = decisionAsk
+	} else if noOpinion {
+		out.decision = ""
 	}
 	return out
 }
@@ -364,7 +373,7 @@ func evaluateBinaryCmd(bc *syntax.BinaryCmd, wrapperPats, commandPats []pattern)
 		return nil
 	}
 	r := approved(left.reason + " | " + right.reason)
-	// Deny takes precedence over ask.
+	// Priority: deny > ask > no-opinion > allow
 	if left.decision == decisionDeny || right.decision == decisionDeny {
 		r.decision = decisionDeny
 		if left.denyReason != "" {
@@ -374,6 +383,8 @@ func evaluateBinaryCmd(bc *syntax.BinaryCmd, wrapperPats, commandPats []pattern)
 		}
 	} else if left.decision == decisionAsk || right.decision == decisionAsk {
 		r.decision = decisionAsk
+	} else if left.decision == "" || right.decision == "" {
+		r.decision = ""
 	}
 	return r
 }
@@ -392,17 +403,26 @@ func evaluateCallExpr(call *syntax.CallExpr, wrapperPats, commandPats []pattern)
 		return nil
 	}
 
-	// Resolve command name. Allow $(which X) / $(command -v X) as equivalent to X.
+	// Resolve command name. Allow $(which X) / $(command -v X) / $(...)/path/to/cmd.
 	cmdName := wordLiteral(call.Args[0])
 	if cmdName == "" {
-		resolved := resolveWhichSubst(call.Args[0])
+		resolved, knownSafe := resolveWhichSubst(call.Args[0])
 		if resolved == "" {
 			return nil
 		}
-		// Check substitutions in remaining args only (Args[0] is the which/command -v)
-		for _, arg := range call.Args[1:] {
-			if !checkSubstitutions(arg, wrapperPats, commandPats) {
-				return nil
+		if knownSafe {
+			// $(which X) / $(command -v X) — inherently safe, only check remaining args
+			for _, arg := range call.Args[1:] {
+				if !checkSubstitutions(arg, wrapperPats, commandPats) {
+					return nil
+				}
+			}
+		} else {
+			// $(...)/path/to/cmd — must verify the inner substitution is safe too
+			for _, arg := range call.Args {
+				if !checkSubstitutions(arg, wrapperPats, commandPats) {
+					return nil
+				}
 			}
 		}
 		return matchAndBuild(resolved, call.Args[1:], call.Assigns, wrapperPats, commandPats)
@@ -463,16 +483,45 @@ func wordLiteral(w *syntax.Word) string {
 	return sb.String()
 }
 
-// resolveWhichSubst checks if a word is exactly $(which <literal>) or
-// $(command -v <literal>) and returns the literal command name.
-// This allows commands like `$(which golangci-lint) run ./...` to be
-// treated as `golangci-lint run ./...` for pattern matching.
-// Returns "" if the word doesn't match this narrow pattern.
-func resolveWhichSubst(w *syntax.Word) string {
-	if len(w.Parts) != 1 {
-		return ""
+// resolveWhichSubst checks if a word resolves to a known command via:
+//   - $(which <cmd>) or $(command -v <cmd>) — returned as knownSafe=true
+//   - $(...)/path/to/<cmd> — any substitution followed by a path suffix
+//     (e.g. $(go env GOROOT)/bin/go, $(brew --prefix)/bin/foo)
+//
+// For the path suffix case, the caller must verify inner substitutions are safe.
+// Returns (resolved command name, knownSafe), or ("", false) if not recognized.
+func resolveWhichSubst(w *syntax.Word) (string, bool) {
+	// Case 1: $(which X) or $(command -v X) — single part, inherently safe
+	if len(w.Parts) == 1 {
+		resolved := resolveWhichOrCommandV(w.Parts[0])
+		return resolved, true
 	}
-	cs, ok := w.Parts[0].(*syntax.CmdSubst)
+
+	// Case 2: $(...)/path/to/cmd — CmdSubst followed by a literal path suffix.
+	if len(w.Parts) == 2 {
+		_, ok := w.Parts[0].(*syntax.CmdSubst)
+		if !ok {
+			return "", false
+		}
+		lit, ok := w.Parts[1].(*syntax.Lit)
+		if !ok {
+			return "", false
+		}
+		// Extract the final path component as the command name (e.g. "/bin/go" → "go")
+		suffix := lit.Value
+		lastSlash := strings.LastIndex(suffix, "/")
+		if lastSlash < 0 || lastSlash == len(suffix)-1 {
+			return "", false
+		}
+		return suffix[lastSlash+1:], false
+	}
+
+	return "", false
+}
+
+// resolveWhichOrCommandV handles $(which X) and $(command -v X).
+func resolveWhichOrCommandV(part syntax.WordPart) string {
+	cs, ok := part.(*syntax.CmdSubst)
 	if !ok || len(cs.Stmts) != 1 {
 		return ""
 	}
@@ -490,6 +539,7 @@ func resolveWhichSubst(w *syntax.Word) string {
 		return ""
 	}
 }
+
 
 // Evaluate checks whether a command should be approved given a config.
 // Returns nil if rejected, or a *result with the approval reason.
@@ -550,9 +600,14 @@ func main() {
 		logDecision(db, payload, cmd, "no-opinion", "")
 		os.Exit(0)
 	}
+	// No-opinion: recognized command but no decision — exit silently, next hook handles it.
+	if r.decision == "" {
+		logDecision(db, payload, cmd, "no-opinion", r.reason)
+		os.Exit(0)
+	}
 	if r.decision == decisionAsk {
 		logDecision(db, payload, cmd, "ask", r.reason)
-		os.Exit(0)
+		emitDecision(decisionAsk, r.reason)
 	}
 
 	reason := r.reason

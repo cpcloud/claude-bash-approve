@@ -14,22 +14,23 @@ This builds the binary, creates `~/.claude/settings.json` if it doesn't exist, a
 
 ## How it works
 
-When Claude Code is about to run a Bash command, this hook intercepts it and makes one of three decisions:
+When Claude Code is about to run a Bash command, this hook intercepts it and makes one of four decisions:
 
-- **approve** — command runs immediately, no prompt
-- **ask** — recognized command, but explicitly falls through to Claude Code's permission prompt (e.g. `git push`, `gh pr create`)
-- **deny** — command is blocked
-- **no opinion** — unrecognized command, falls through to Claude Code's normal permission prompt
+- **allow** — command runs immediately, no prompt
+- **deny** — command is blocked (with a reason shown to Claude)
+- **ask** — recognized command, user is prompted to confirm (terminal — no further hooks run) (e.g. `git tag`)
+- **no opinion** — hook has nothing to say, exits silently so the next hook in the chain can handle it (e.g. `git push`, `gh pr create`, or unrecognized commands)
 
 ```mermaid
 flowchart TD
     A["Claude Code runs Bash command"] --> B["Parse command AST"]
     B --> C{"All segments\nmatched?"}
-    C -- No --> D["**no opinion**\nfall through to prompt"]
-    C -- Yes --> E{"Check decision\nfor each segment"}
-    E -- "all approve" --> F["**approve**\nrun immediately"]
-    E -- "any ask" --> G["**ask**\nfall through to prompt"]
-    E -- "any deny" --> H["**deny**\nblock command"]
+    C -- No --> D["**no opinion**\nnext hook in chain"]
+    C -- Yes --> E{"Merge segment\ndecisions"}
+    E -- "any deny" --> F["**deny**\nblock command"]
+    E -- "any ask\n(no deny)" --> G["**ask**\nprompt user"]
+    E -- "any no-opinion\n(no deny/ask)" --> D
+    E -- "all allow" --> H["**allow**\nrun immediately"]
 ```
 
 Commands are parsed into an AST (using [mvdan/sh](https://github.com/mvdan/sh)) so chained commands (`&&`, `||`, `;`, `|`), subshells, command substitutions (`$(…)`), and control flow (`if`, `for`, `while`) are all handled correctly — every segment must be safe for the whole command to be approved.
