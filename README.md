@@ -23,8 +23,7 @@ When Claude Code is about to run a Bash command, this hook intercepts it and mak
 
 ```mermaid
 flowchart LR
-    A["Bash command"] --> B["Parse AST"]
-    B --> C{"All matched?"}
+    A["Parse command AST"] --> C{"All matched?"}
     C -- No --> NOP["**no opinion**\nnext hook"]
     C -- Yes --> D{"any deny?"}
     D -- Yes --> DENY["**deny**\nblock"]
