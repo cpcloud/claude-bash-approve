@@ -5,10 +5,12 @@ import "regexp"
 // pattern defines a command or wrapper that can be matched.
 // tags controls both the label (first tag) and config matching (all tags).
 // decision is the hook permission decision: "allow" (default) or "" (no opinion, ask user).
+// denyReason, if set, is shown to Claude when the command is denied, explaining why.
 type pattern struct {
-	re       *regexp.Regexp
-	tags     []string
-	decision string
+	re         *regexp.Regexp
+	tags       []string
+	decision   string
+	denyReason string
 }
 
 // label returns the first tag, used in approval reason strings.
@@ -23,10 +25,17 @@ func WithDecision(decision string) patternOption {
 	}
 }
 
+// WithDenyReason sets a human-readable reason shown to Claude when a command is denied.
+func WithDenyReason(reason string) patternOption {
+	return func(p *pattern) {
+		p.denyReason = reason
+	}
+}
+
 func tags(t ...string) []string { return t }
 
 func NewPattern(re string, t []string, opts ...patternOption) pattern {
-	p := pattern{regexp.MustCompile(re), t, decisionAllow}
+	p := pattern{re: regexp.MustCompile(re), tags: t, decision: decisionAllow}
 	for _, opt := range opts {
 		opt(&p)
 	}
@@ -49,7 +58,18 @@ var allWrapperPatterns = []pattern{
 var allCommandPatterns = []pattern{
 	// git
 	NewPattern(`^git\s+(-C\s+\S+\s+)?(diff|log|status|show|branch|stash\s+list|bisect|worktree\s+list|fetch|ls-files|ls-remote|rev-parse|describe|blame|grep|check-ignore|shortlog|name-rev|cat-file)\b`, tags("git read op", "git")),
-	NewPattern(`^git\s+(-C\s+\S+\s+)?(add|checkout|commit|merge|pull|rebase|stash|switch|remote|config|rerere)\b`, tags("git write op", "git")),
+	// git destructive ops — blocked by default (matches before write ops)
+	NewPattern(`^git\s+(-C\s+\S+\s+)?stash\b`, tags("git stash", "git destructive", "git"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: git stash is banned. It destroys work and causes merge conflicts. Make targeted edits instead.")),
+	NewPattern(`^git\s+(-C\s+\S+\s+)?revert\b`, tags("git revert", "git destructive", "git"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: git revert is banned. Use targeted edits to undo changes.")),
+	NewPattern(`^git\s+(-C\s+\S+\s+)?reset\s+--hard\b`, tags("git reset --hard", "git destructive", "git"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: git reset --hard is banned. It destroys uncommitted work.")),
+	NewPattern(`^git\s+(-C\s+\S+\s+)?checkout\s+(--\s+)?\.$`, tags("git checkout .", "git destructive", "git"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: blanket git checkout is banned. Restore specific files only.")),
+	NewPattern(`^git\s+(-C\s+\S+\s+)?clean\s+-[a-zA-Z]*f`, tags("git clean -f", "git destructive", "git"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: git clean -f is banned. Remove specific files only.")),
+	NewPattern(`^git\s+(-C\s+\S+\s+)?(add|checkout|commit|merge|pull|rebase|switch|remote|config|rerere)\b`, tags("git write op", "git")),
 	NewPattern(`^git\s+(-C\s+\S+\s+)?push\b`, tags("git push", "git"), WithDecision("")),
 
 	// jj (Jujutsu)
@@ -113,7 +133,8 @@ var allCommandPatterns = []pattern{
 	NewPattern(`^gh\s+api\b`, tags("gh api", "gh")),
 
 	// go
-	NewPattern(`^go\s+mod\s+vendor\b`, tags("go mod vendor", "go"), WithDecision("deny")),
+	NewPattern(`^go\s+mod\s+vendor\b`, tags("go mod vendor", "go"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: go mod vendor is banned. It copies all dependencies into the repo.")),
 	NewPattern(`^go\s+mod\s+init\b`, tags("go mod init", "go"), WithDecision("")),
 	NewPattern(`^go\s+(build|test|vet|list|get|mod\s+(tidy|download)|run|fmt|generate|install|clean|doc|env|version|tool)\b`, tags("go")),
 	NewPattern(`^golangci-lint\b`, tags("golangci-lint", "go")),
@@ -138,7 +159,8 @@ var allCommandPatterns = []pattern{
 
 	// roborev
 	NewPattern(`^roborev\s+show\b`, tags("roborev show", "roborev")),
-	NewPattern(`^roborev\s+tui\b`, tags("roborev tui", "roborev"), WithDecision("deny")),
+	NewPattern(`^roborev\s+tui\b`, tags("roborev tui", "roborev"), WithDecision("deny"),
+		WithDenyReason("BLOCKED: roborev tui is an interactive TUI that cannot run in a non-interactive shell.")),
 	NewPattern(`^roborev\s+(list|summary|wait|stream)\b`, tags("roborev read op", "roborev")),
 	NewPattern(`^roborev\b`, tags("roborev")),
 

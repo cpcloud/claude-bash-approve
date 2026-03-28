@@ -10,6 +10,7 @@
 # To auto-approve them, add them to "enabled" explicitly.
 #
 # Some commands default to "deny" (blocked):
+#   git stash, git revert, git reset --hard, git checkout ., git clean -f
 #   go mod vendor, roborev tui
 #
 # Available coarse groups:
@@ -17,7 +18,9 @@
 #
 # Fine-grained names within each group:
 #   wrapper:  timeout, nice, env, env vars, .venv, bundle exec, rtk proxy, command
-#   git:      git read op, git write op, git push
+#   git:      git read op, git write op, git push, git destructive
+#             git stash (deny), git revert (deny), git reset --hard (deny),
+#             git checkout . (deny), git clean -f (deny)
 #   python:   pytest, python, ruff, uv, uvx
 #   node:     npm, npx
 #   rust:     cargo, maturin

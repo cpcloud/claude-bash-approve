@@ -60,8 +60,9 @@ const tagEnvVars = "env vars"
 
 // result represents an evaluation outcome. A nil *result means unknown command (no opinion).
 type result struct {
-	reason   string
-	decision string
+	reason     string
+	decision   string
+	denyReason string // human-readable explanation shown to Claude on deny
 }
 
 func approved(reason string) *result { return &result{reason: reason, decision: decisionAllow} }
@@ -289,6 +290,7 @@ func evaluateCommand(cmd syntax.Command, wrapperPats, commandPats []pattern) *re
 // Returns nil if any statement is rejected.
 func mergeStmtResults(stmts []*syntax.Stmt, wrapperPats, commandPats []pattern) *result {
 	var reasons []string
+	var firstDenyReason string
 	askDecision := false
 	denyDecision := false
 	for _, stmt := range stmts {
@@ -302,11 +304,15 @@ func mergeStmtResults(stmts []*syntax.Stmt, wrapperPats, commandPats []pattern) 
 		}
 		if r.decision == decisionDeny {
 			denyDecision = true
+			if firstDenyReason == "" && r.denyReason != "" {
+				firstDenyReason = r.denyReason
+			}
 		}
 	}
 	out := approved(strings.Join(reasons, " | "))
 	if denyDecision {
 		out.decision = decisionDeny
+		out.denyReason = firstDenyReason
 	} else if askDecision {
 		out.decision = decisionAsk
 	}
@@ -361,6 +367,11 @@ func evaluateBinaryCmd(bc *syntax.BinaryCmd, wrapperPats, commandPats []pattern)
 	// Deny takes precedence over ask.
 	if left.decision == decisionDeny || right.decision == decisionDeny {
 		r.decision = decisionDeny
+		if left.denyReason != "" {
+			r.denyReason = left.denyReason
+		} else {
+			r.denyReason = right.denyReason
+		}
 	} else if left.decision == decisionAsk || right.decision == decisionAsk {
 		r.decision = decisionAsk
 	}
@@ -423,7 +434,7 @@ func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.A
 	if len(wrappers) > 0 {
 		reason = strings.Join(wrappers, "+") + "+" + reason
 	}
-	return &result{reason: reason, decision: matched.decision}
+	return &result{reason: reason, decision: matched.decision, denyReason: matched.denyReason}
 }
 
 // wordLiteral returns the literal string value of a word if it contains no
@@ -544,6 +555,10 @@ func main() {
 		os.Exit(0)
 	}
 
-	logDecision(db, payload, cmd, r.decision, r.reason)
-	emitDecision(r.decision, r.reason)
+	reason := r.reason
+	if r.decision == decisionDeny && r.denyReason != "" {
+		reason = r.denyReason
+	}
+	logDecision(db, payload, cmd, r.decision, reason)
+	emitDecision(r.decision, reason)
 }

@@ -53,7 +53,7 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"git merge", "git merge feature-branch", "git write op"},
 		{"git pull", "git pull origin main", "git write op"},
 		{"git rebase", "git rebase main", "git write op"},
-		{"git stash push", "git stash", "git write op"},
+		{"git stash list -C path", "git -C /repo stash list", "git read op"},
 		{"git switch", "git switch feature-branch", "git write op"},
 		{"git remote", "git remote add origin url", "git write op"},
 		{"git config", "git config user.name", "git write op"},
@@ -858,24 +858,131 @@ func TestAskDecision(t *testing.T) {
 		assert.Empty(t, r.decision, "go mod init should have empty decision (ask)")
 	})
 
-	t.Run("go mod vendor has deny decision", func(t *testing.T) {
+	t.Run("go mod vendor has deny decision with reason", func(t *testing.T) {
 		r := evaluateAll("go mod vendor")
 		require.NotNil(t, r)
 		assert.Equal(t, "go mod vendor", r.reason)
 		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "go mod vendor is banned")
 	})
 
-	t.Run("chain with deny propagates deny", func(t *testing.T) {
+	t.Run("chain with deny propagates deny and reason", func(t *testing.T) {
 		r := evaluateAll("go mod tidy && go mod vendor")
 		require.NotNil(t, r)
 		assert.Equal(t, "deny", r.decision, "chain containing go mod vendor should have deny decision")
+		assert.Contains(t, r.denyReason, "go mod vendor is banned")
 	})
 
-	t.Run("roborev tui has deny decision", func(t *testing.T) {
+	t.Run("roborev tui has deny decision with reason", func(t *testing.T) {
 		r := evaluateAll("roborev tui")
 		require.NotNil(t, r)
 		assert.Equal(t, "roborev tui", r.reason)
 		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "interactive TUI")
+	})
+
+	// --- git destructive ops (deny) ---
+	t.Run("git stash denied with reason", func(t *testing.T) {
+		r := evaluateAll("git stash")
+		require.NotNil(t, r)
+		assert.Equal(t, "git stash", r.reason)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "git stash is banned")
+	})
+
+	t.Run("git stash push denied", func(t *testing.T) {
+		r := evaluateAll("git stash push -m 'wip'")
+		require.NotNil(t, r)
+		assert.Equal(t, "git stash", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("git stash pop denied", func(t *testing.T) {
+		r := evaluateAll("git stash pop")
+		require.NotNil(t, r)
+		assert.Equal(t, "git stash", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("git stash list still allowed", func(t *testing.T) {
+		r := evaluateAll("git stash list")
+		require.NotNil(t, r)
+		assert.Equal(t, "git read op", r.reason)
+		assert.Equal(t, "allow", r.decision)
+	})
+
+	t.Run("git revert denied with reason", func(t *testing.T) {
+		r := evaluateAll("git revert HEAD")
+		require.NotNil(t, r)
+		assert.Equal(t, "git revert", r.reason)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "git revert is banned")
+	})
+
+	t.Run("git reset --hard denied with reason", func(t *testing.T) {
+		r := evaluateAll("git reset --hard HEAD~1")
+		require.NotNil(t, r)
+		assert.Equal(t, "git reset --hard", r.reason)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "git reset --hard is banned")
+	})
+
+	t.Run("git -C path reset --hard denied", func(t *testing.T) {
+		r := evaluateAll("git -C /repo reset --hard")
+		require.NotNil(t, r)
+		assert.Equal(t, "git reset --hard", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("git checkout . denied with reason", func(t *testing.T) {
+		r := evaluateAll("git checkout .")
+		require.NotNil(t, r)
+		assert.Equal(t, "git checkout .", r.reason)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "blanket git checkout is banned")
+	})
+
+	t.Run("git checkout -- . denied", func(t *testing.T) {
+		r := evaluateAll("git checkout -- .")
+		require.NotNil(t, r)
+		assert.Equal(t, "git checkout .", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("git checkout branch still allowed", func(t *testing.T) {
+		r := evaluateAll("git checkout main")
+		require.NotNil(t, r)
+		assert.Equal(t, "git write op", r.reason)
+		assert.Equal(t, "allow", r.decision)
+	})
+
+	t.Run("git clean -f denied with reason", func(t *testing.T) {
+		r := evaluateAll("git clean -f")
+		require.NotNil(t, r)
+		assert.Equal(t, "git clean -f", r.reason)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "git clean -f is banned")
+	})
+
+	t.Run("git clean -fd denied", func(t *testing.T) {
+		r := evaluateAll("git clean -fd")
+		require.NotNil(t, r)
+		assert.Equal(t, "git clean -f", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("git -C path clean -f denied", func(t *testing.T) {
+		r := evaluateAll("git -C /repo clean -fd")
+		require.NotNil(t, r)
+		assert.Equal(t, "git clean -f", r.reason)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("chain with git destructive propagates deny and reason", func(t *testing.T) {
+		r := evaluateAll("git add . && git reset --hard")
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "git reset --hard is banned")
 	})
 
 	t.Run("git diff has allow decision", func(t *testing.T) {
