@@ -25,13 +25,16 @@ When Claude Code is about to run a Bash command, this hook intercepts it and mak
 flowchart LR
     A["Parse command AST"] --> C{"All matched?"}
     C -- No --> NOP["**no opinion**\nnext hook"]
-    C -- Yes --> D{"any deny?"}
-    D -- Yes --> DENY["**deny**\nblock"]
-    D -- No --> E{"any ask?"}
-    E -- Yes --> ASK["**ask**\nprompt"]
-    E -- No --> F{"any\nno-opinion?"}
+    C -- Yes --> D
+    subgraph priority["Decision priority"]
+        direction LR
+        D{"any deny?"} -- Yes --> DENY["**deny**\nblock"]
+        D -- No --> E{"any ask?"}
+        E -- Yes --> ASK["**ask**\nprompt"]
+        E -- No --> F{"any\nno-opinion?"}
+        F -- No --> ALLOW["**allow**\nrun"]
+    end
     F -- Yes --> NOP
-    F -- No --> ALLOW["**allow**\nrun"]
 ```
 
 Commands are parsed into an AST (using [mvdan/sh](https://github.com/mvdan/sh)) so chained commands (`&&`, `||`, `;`, `|`), subshells, command substitutions (`$(…)`), and control flow (`if`, `for`, `while`) are all handled correctly — every segment must be safe for the whole command to be approved.
