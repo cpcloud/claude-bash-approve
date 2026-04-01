@@ -165,7 +165,7 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"file", "file binary", "read-only"},
 		{"which", "which python", "read-only"},
 		{"pwd", "pwd", "read-only"},
-		{"curl", "curl -s https://example.com", "read-only"},
+		{"curl", "curl -s https://example.com", "curl"},
 		{"sort", "sort output.txt", "read-only"},
 		{"uniq", "uniq -c counts.txt", "read-only"},
 		{"cut", "cut -d: -f1 /etc/passwd", "read-only"},
