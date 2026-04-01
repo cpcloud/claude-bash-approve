@@ -67,10 +67,7 @@ func isFindSafe(args []*syntax.Word) bool {
 			if part == ";" || part == `\;` || part == "+" {
 				break
 			}
-			// skip {} placeholder — it's not part of the command
-			if !strings.Contains(part, "{}") {
-				cmdParts = append(cmdParts, part)
-			}
+			cmdParts = append(cmdParts, part)
 			i++
 		}
 
@@ -84,7 +81,7 @@ func isFindSafe(args []*syntax.Word) bool {
 		if r == nil {
 			return false // unknown command
 		}
-		if r.decision == decisionDeny {
+		if r.decision != decisionAllow {
 			return false
 		}
 	}

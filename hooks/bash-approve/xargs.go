@@ -91,5 +91,5 @@ func isXargsSafe(args []*syntax.Word) bool {
 	if r == nil {
 		return false
 	}
-	return r.decision != decisionDeny
+	return r.decision == decisionAllow
 }

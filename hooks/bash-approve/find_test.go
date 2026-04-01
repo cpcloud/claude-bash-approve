@@ -93,3 +93,35 @@ func TestFindUnsafe(t *testing.T) {
 		})
 	}
 }
+
+func TestFindXargsNested(t *testing.T) {
+	t.Run("find piped to xargs with safe command", func(t *testing.T) {
+		r := evaluateAll("find . -name '*.go' -print0 | xargs -0 grep TODO")
+		require.NotNil(t, r)
+		assert.Equal(t, "allow", r.decision)
+	})
+
+	t.Run("find exec xargs exec safe", func(t *testing.T) {
+		r := evaluateAll(`find . -name '*.txt' -exec xargs -0 cat {} \;`)
+		require.NotNil(t, r)
+		assert.Equal(t, "allow", r.decision)
+	})
+
+	t.Run("find exec xargs exec unsafe", func(t *testing.T) {
+		r := evaluateAll(`find . -name '*.txt' -exec xargs -0 rm {} \;`)
+		require.NotNil(t, r)
+		assert.Equal(t, "ask", r.decision)
+	})
+
+	t.Run("nested find xargs find xargs safe", func(t *testing.T) {
+		r := evaluateAll(`find . -name Makefile -exec xargs -I {} find {} -name '*.o' -exec xargs cat {} \; \;`)
+		require.NotNil(t, r)
+		assert.Equal(t, "allow", r.decision)
+	})
+
+	t.Run("nested find xargs find xargs unsafe at leaf", func(t *testing.T) {
+		r := evaluateAll(`find . -name Makefile -exec xargs -I {} find {} -name '*.o' -exec xargs rm {} \; \;`)
+		require.NotNil(t, r)
+		assert.Equal(t, "ask", r.decision)
+	})
+}
