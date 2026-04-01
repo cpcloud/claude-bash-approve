@@ -64,7 +64,7 @@ func isFindSafe(args []*syntax.Word) bool {
 				// non-literal in exec command — can't validate statically
 				return false
 			}
-			if part == ";" || part == "+" {
+			if part == ";" || part == `\;` || part == "+" {
 				break
 			}
 			// skip {} placeholder — it's not part of the command

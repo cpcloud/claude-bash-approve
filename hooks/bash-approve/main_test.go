@@ -172,7 +172,7 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"tr", "tr '[:upper:]' '[:lower:]'", "read-only"},
 		{"awk", "awk '{print $1}' file", "read-only"},
 		{"sed", "sed 's/foo/bar/g' file", "read-only"},
-		{"xargs", "xargs rm", "read-only"},
+		{"xargs echo", "xargs echo", "xargs"},
 		{"xxd", "xxd file.bin", "read-only"},
 		{"od", "od -A x -t x1z file.bin", "read-only"},
 		{"hexdump", "hexdump -C file.bin", "read-only"},

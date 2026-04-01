@@ -126,8 +126,9 @@ var allCommandPatterns = []pattern{
 	// shell
 	NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
 		WithDenyReason("BLOCKED: rm -r is banned. Remove specific files only, not entire directory trees.")),
-	NewPattern(`^(ls|cat|head|tail|wc|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|awk|sed|xargs|xxd|od|hexdump|sqlite3|tee|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
+	NewPattern(`^(ls|cat|head|tail|wc|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|awk|sed|xxd|od|hexdump|sqlite3|tee|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
 	NewPattern(`^curl\b`, tags("curl", "shell"), WithValidator(isCurlReadOnly)),
+	NewPattern(`^xargs\b`, tags("xargs", "shell")), // validator set in init() to break cycle
 	NewPattern(`^find\b`, tags("find", "shell")), // validator set in init() to break cycle
 	NewPattern(`^touch\b`, tags("touch", "shell")),
 	NewPattern(`^mkdir\b`, tags("mkdir", "shell")),
