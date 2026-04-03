@@ -456,7 +456,7 @@ func evaluateCallExpr(call *syntax.CallExpr, wrapperPats, commandPats []pattern)
 				}
 			}
 		}
-		return matchAndBuild(resolved, call.Args[1:], call.Assigns, wrapperPats, commandPats)
+		return matchAndBuild(resolved, call.Args[1:], call.Assigns, call.Args, wrapperPats, commandPats)
 	}
 
 	// Normal path: check all substitutions
@@ -464,12 +464,13 @@ func evaluateCallExpr(call *syntax.CallExpr, wrapperPats, commandPats []pattern)
 		return nil
 	}
 
-	return matchAndBuild(argsText(call.Args), nil, call.Assigns, wrapperPats, commandPats)
+	return matchAndBuild(argsText(call.Args), nil, call.Assigns, call.Args, wrapperPats, commandPats)
 }
 
 // matchAndBuild strips wrappers, matches the command, and builds the result.
 // cmdText is the primary command text. extraArgs are appended if non-nil.
-func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.Assign, wrapperPats, commandPats []pattern) *result {
+// astArgs are the raw AST arguments passed to pattern validators.
+func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.Assign, astArgs []*syntax.Word, wrapperPats, commandPats []pattern) *result {
 	if len(extraArgs) > 0 {
 		cmdText += " " + argsText(extraArgs)
 	}
@@ -477,6 +478,10 @@ func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.A
 	matched := matchCommand(coreCmd, commandPats)
 	if matched == nil {
 		return nil
+	}
+	// Run post-match validator if present; false downgrades to "ask".
+	if matched.validate != nil && !matched.validate(astArgs) {
+		return &result{reason: matched.label(), decision: decisionAsk}
 	}
 	if len(assigns) > 0 && !slices.Contains(wrappers, tagEnvVars) {
 		wrappers = append([]string{tagEnvVars}, wrappers...)

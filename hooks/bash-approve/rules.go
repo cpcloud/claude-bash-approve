@@ -1,16 +1,26 @@
 package main
 
-import "regexp"
+import (
+	"regexp"
+
+	"mvdan.cc/sh/v3/syntax"
+)
 
 // pattern defines a command or wrapper that can be matched.
 // tags controls both the label (first tag) and config matching (all tags).
 // decision is the hook permission decision: "allow" (default) or "" (no opinion, ask user).
 // denyReason, if set, is shown to Claude when the command is denied, explaining why.
+// argsValidator is called after a regex match to refine the decision using
+// the parsed AST arguments. Return true to keep the matched decision, false
+// to downgrade to "ask" (no opinion).
+type argsValidator func(args []*syntax.Word) bool
+
 type pattern struct {
 	re         *regexp.Regexp
 	tags       []string
 	decision   string
 	denyReason string
+	validate   argsValidator
 }
 
 // label returns the first tag, used in approval reason strings.
@@ -29,6 +39,13 @@ func WithDecision(decision string) patternOption {
 func WithDenyReason(reason string) patternOption {
 	return func(p *pattern) {
 		p.denyReason = reason
+	}
+}
+
+// WithValidator attaches an argument validator that runs after regex match.
+func WithValidator(v argsValidator) patternOption {
+	return func(p *pattern) {
+		p.validate = v
 	}
 }
 
@@ -109,7 +126,8 @@ var allCommandPatterns = []pattern{
 	// shell
 	NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
 		WithDenyReason("BLOCKED: rm -r is banned. Remove specific files only, not entire directory trees.")),
-	NewPattern(`^(ls|cat|head|tail|wc|find|grep|rg|file|which|pwd|du|df|curl|sort|uniq|cut|tr|awk|sed|xargs|xxd|od|hexdump|sqlite3|tee|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
+	NewPattern(`^(ls|cat|head|tail|wc|find|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|awk|sed|xargs|xxd|od|hexdump|sqlite3|tee|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
+	NewPattern(`^curl\b`, tags("curl", "shell"), WithValidator(isCurlReadOnly)),
 	NewPattern(`^touch\b`, tags("touch", "shell")),
 	NewPattern(`^mkdir\b`, tags("mkdir", "shell")),
 	NewPattern(`^cp\s+-[a-zA-Z]*n`, tags("cp -n", "shell")),
