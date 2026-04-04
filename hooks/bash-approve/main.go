@@ -480,8 +480,13 @@ func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.A
 		return nil
 	}
 	// Run post-match validator if present; false downgrades to "ask".
-	if matched.validate != nil && !matched.validate(astArgs) {
-		return &result{reason: matched.label(), decision: decisionAsk}
+	if matched.validate != nil {
+		eval := func(cmd string) *result {
+			return evaluate(cmd, wrapperPats, commandPats)
+		}
+		if !matched.validate(astArgs, eval) {
+			return &result{reason: matched.label(), decision: decisionAsk}
+		}
 	}
 	if len(assigns) > 0 && !slices.Contains(wrappers, tagEnvVars) {
 		wrappers = append([]string{tagEnvVars}, wrappers...)

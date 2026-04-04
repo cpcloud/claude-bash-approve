@@ -10,10 +10,15 @@ import (
 // tags controls both the label (first tag) and config matching (all tags).
 // decision is the hook permission decision: "allow" (default) or "" (no opinion, ask user).
 // denyReason, if set, is shown to Claude when the command is denied, explaining why.
+
+// evaluatorFunc evaluates a command string against pattern lists.
+// Used to break circular dependencies between validators and pattern definitions.
+type evaluatorFunc func(cmd string) *result
+
 // argsValidator is called after a regex match to refine the decision using
-// the parsed AST arguments. Return true to keep the matched decision, false
-// to downgrade to "ask" (no opinion).
-type argsValidator func(args []*syntax.Word) bool
+// the parsed AST arguments (including command name at [0]).
+// Return true to keep the matched decision, false to downgrade to "ask".
+type argsValidator func(args []*syntax.Word, eval evaluatorFunc) bool
 
 type pattern struct {
 	re         *regexp.Regexp
