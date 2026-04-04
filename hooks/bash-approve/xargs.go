@@ -6,15 +6,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-func init() {
-	for i := range allCommandPatterns {
-		if allCommandPatterns[i].tags[0] == "xargs" {
-			allCommandPatterns[i].validate = isXargsSafe
-			break
-		}
-	}
-}
-
 // xargsFlags are xargs flags that consume the next argument as a value.
 var xargsValueFlags = map[string]bool{
 	"-I": true, "-L": true, "-n": true, "-P": true, "-d": true,
@@ -87,7 +78,7 @@ func isXargsSafe(args []*syntax.Word, ctx evalContext) bool {
 	}
 
 	cmd := strings.Join(cmdParts, " ")
-	r := evaluate(cmd, ctx, allWrapperPatterns, allCommandPatterns)
+	r := evaluate(cmd, ctx, wrapperPatterns(), commandPatterns())
 	if r == nil {
 		return false
 	}
