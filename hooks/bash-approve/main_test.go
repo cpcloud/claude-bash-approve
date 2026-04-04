@@ -13,7 +13,7 @@ import (
 
 // helper: evaluate with all patterns
 func evaluateAll(cmd string) *result {
-	return evaluate(cmd, allWrapperPatterns, allCommandPatterns)
+	return evaluate(cmd, wrapperPatterns(), commandPatterns())
 }
 
 func TestEvaluate_Approved(t *testing.T) {
@@ -604,7 +604,7 @@ func TestStripWrappers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			core, wrappers := stripWrappers(tt.cmd, allWrapperPatterns)
+			core, wrappers := stripWrappers(tt.cmd, wrapperPatterns())
 			assert.Equal(t, tt.expectedCmd, core)
 			assert.Equal(t, tt.expectedWrap, wrappers)
 		})
@@ -761,8 +761,8 @@ func TestBuildActivePatterns(t *testing.T) {
 	t.Run("all enabled returns everything", func(t *testing.T) {
 		cfg := Config{Enabled: []string{"all"}}
 		wrappers, commands := buildActivePatterns(cfg)
-		assert.Len(t, wrappers, len(allWrapperPatterns))
-		assert.Len(t, commands, len(allCommandPatterns))
+		assert.Len(t, wrappers, len(wrapperPatterns()))
+		assert.Len(t, commands, len(commandPatterns()))
 	})
 
 	t.Run("only git enabled", func(t *testing.T) {
@@ -1187,7 +1187,7 @@ func TestLoadConfigFromPath(t *testing.T) {
 }
 
 func TestPatternTagsNonEmpty(t *testing.T) {
-	allPatterns := append(allWrapperPatterns, allCommandPatterns...)
+	allPatterns := append(wrapperPatterns(), commandPatterns()...)
 	for _, p := range allPatterns {
 		assert.NotEmpty(t, p.tags, "pattern with regex %v has no tags", p.re)
 	}
@@ -1214,7 +1214,7 @@ func TestNoOverlappingPatterns(t *testing.T) {
 
 	for _, cmd := range commands {
 		var matches []string
-		for _, sc := range allCommandPatterns {
+		for _, sc := range commandPatterns() {
 			if sc.re.MatchString(cmd) {
 				matches = append(matches, sc.label())
 			}
