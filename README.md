@@ -1,6 +1,6 @@
 # claude-bash-approve
 
-A Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that auto-approves safe Bash commands and blocks dangerous ones. Written in Go for fast startup.
+A Claude Code [PreToolUse hook](https://code.claude.com/docs/en/hooks) that auto-approves safe Bash commands, repo-scoped `Read`/`Grep` calls, and blocks dangerous operations. Written in Go for fast startup.
 
 ## Install
 
@@ -14,7 +14,7 @@ That's it. The hook registers automatically and the Go binary compiles on first 
 
 ## How it works
 
-When Claude Code is about to run a Bash command, this hook intercepts it and makes one of four decisions:
+When Claude Code is about to run a matched tool call, this hook intercepts it and makes one of four decisions:
 
 - **deny** — command is blocked (with a reason shown to Claude)
 - **ask** — recognized command, user is prompted to confirm (terminal — no further hooks run) (e.g. `git tag`)
@@ -38,6 +38,8 @@ flowchart TD
 
 Commands are parsed into an AST (using [mvdan/sh](https://github.com/mvdan/sh)) so chained commands (`&&`, `||`, `;`, `|`), subshells, command substitutions (`$(…)`), and control flow (`if`, `for`, `while`) are all handled correctly — every segment must be safe for the whole command to be approved.
 
+For `Read` and `Grep`, the hook auto-approves only when the referenced paths stay inside the current Git repo or linked worktree root derived from the incoming `cwd`. Anything outside that boundary falls back to no-opinion.
+
 ### Wrappers + Commands
 
 The hook uses a compositional model: a command is split into **wrappers** (prefixes like `timeout 30`, `env`, `VAR=val`) and a **core command** (like `git status`, `pytest`). Both are matched against regex patterns organized into categories.
@@ -52,7 +54,7 @@ cd claude-bash-approve
 ./install.sh
 ```
 
-Builds the binary, creates `~/.claude/settings.json` if needed, and adds the hook. Pass `--force` to merge into an existing settings file (requires `jq`).
+Copies the hook source bundle into `~/.claude/hooks/bash-approve/`, builds the binary there, creates `~/.claude/settings.json` if needed, and adds the hook. Pass `--force` to merge into an existing settings file (requires `jq`).
 
 ### Manual setup
 
@@ -73,7 +75,16 @@ git clone https://github.com/mariusvniekerk/claude-bash-approve.git
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/claude-bash-approve/hooks/bash-approve/run-hook.sh"
+            "command": "~/.claude/hooks/bash-approve/run-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/bash-approve/run-hook.sh"
           }
         ]
       }
@@ -82,13 +93,21 @@ git clone https://github.com/mariusvniekerk/claude-bash-approve.git
 }
 ```
 
-Replace `/path/to/` with the actual path to your clone.
+3. Copy the runtime hook bundle into `~/.claude/hooks/bash-approve/`:
 
-3. The hook auto-compiles on first run. The `run-hook.sh` shim rebuilds the Go binary whenever source files change, so there's no manual build step.
+```bash
+mkdir -p ~/.claude/hooks/bash-approve
+cp hooks/bash-approve/*.go ~/.claude/hooks/bash-approve/
+cp hooks/bash-approve/go.mod hooks/bash-approve/go.sum ~/.claude/hooks/bash-approve/
+cp hooks/bash-approve/categories.yaml hooks/bash-approve/run-hook.sh ~/.claude/hooks/bash-approve/
+chmod +x ~/.claude/hooks/bash-approve/run-hook.sh
+```
+
+4. The hook auto-compiles on first run. The `run-hook.sh` shim rebuilds the Go binary whenever source files change, so there's no manual build step.
 
 ## Configuration
 
-Command categories are configured in `hooks/bash-approve/categories.yaml`. When this file is absent or empty, all commands are approved (with some exceptions noted below).
+Command categories are configured in `hooks/bash-approve/categories.yaml` for Bash command matching. When this file is absent or empty, all matched Bash commands are approved (with some exceptions noted below). `Read` and `Grep` are governed by repo/worktree path checks instead.
 
 ### Enabled / Disabled
 
@@ -148,10 +167,10 @@ See `categories.yaml` for the full reference with examples.
 
 ## Telemetry
 
-Every decision is logged to a local SQLite database (`telemetry.db`, next to the binary). This lets you review what the hook approved, denied, or passed through:
+Every decision is logged to a local SQLite database (`telemetry.db`, next to the binary). With the install script deployment model, this lives at `~/.claude/hooks/bash-approve/telemetry.db`. This lets you review what the hook approved, denied, or passed through:
 
 ```bash
-sqlite3 hooks/bash-approve/telemetry.db "SELECT ts, decision, command, reason FROM decisions ORDER BY ts DESC LIMIT 20"
+sqlite3 ~/.claude/hooks/bash-approve/telemetry.db "SELECT ts, decision, command, reason FROM decisions ORDER BY ts DESC LIMIT 20"
 ```
 
 Telemetry is best-effort — if the database can't be opened or written to, the hook continues normally.
