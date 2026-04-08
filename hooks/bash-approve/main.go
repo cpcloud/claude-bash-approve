@@ -151,21 +151,21 @@ func toSet(items []string) map[string]bool {
 	return s
 }
 
-// buildActivePatterns filters the global pattern lists based on the config.
+// buildActivePatterns filters pattern lists based on the config.
 func buildActivePatterns(cfg Config) (wrappers []pattern, commands []pattern) {
-	// Fast path: if all enabled and nothing disabled, return globals directly.
+	// Fast path: if all enabled and nothing disabled, return all patterns.
 	if len(cfg.Disabled) == 0 && len(cfg.Enabled) == 1 && cfg.Enabled[0] == "all" {
-		return allWrapperPatterns, allCommandPatterns
+		return wrapperPatterns(), commandPatterns()
 	}
 
 	enabled := toSet(cfg.Enabled)
 	disabled := toSet(cfg.Disabled)
-	for _, p := range allWrapperPatterns {
+	for _, p := range wrapperPatterns() {
 		if isEnabled(p.tags, enabled, disabled) {
 			wrappers = append(wrappers, p)
 		}
 	}
-	for _, p := range allCommandPatterns {
+	for _, p := range commandPatterns() {
 		if isEnabled(p.tags, enabled, disabled) {
 			commands = append(commands, p)
 		}

@@ -19,17 +19,6 @@ var findDangerousFlags = map[string]bool{
 	"-delete": true,
 }
 
-func init() {
-	// Attach the find validator after allCommandPatterns is initialized
-	// to break the init cycle (isFindSafe → evaluate → allCommandPatterns).
-	for i := range allCommandPatterns {
-		if allCommandPatterns[i].tags[0] == "find" {
-			allCommandPatterns[i].validate = isFindSafe
-			break
-		}
-	}
-}
-
 // isFindSafe validates a find invocation by checking -exec/-execdir commands
 // through the normal evaluation pipeline. Returns false (ask) if any embedded
 // command is unrecognized or if -delete is present.
@@ -77,7 +66,7 @@ func isFindSafe(args []*syntax.Word, ctx evalContext) bool {
 
 		// Evaluate the embedded command through the normal pipeline.
 		cmd := strings.Join(cmdParts, " ")
-		r := evaluate(cmd, ctx, allWrapperPatterns, allCommandPatterns)
+		r := evaluate(cmd, ctx, wrapperPatterns(), commandPatterns())
 		if r == nil {
 			return false // unknown command
 		}
