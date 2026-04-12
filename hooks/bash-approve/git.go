@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,10 @@ func isCurrentRepoWorktreeCD(args []*syntax.Word, ctx evalContext) bool {
 		return false
 	}
 
+	if pathIsExistingDirWithinRepo(ctx.cwd, resolvedTarget) {
+		return true
+	}
+
 	currentCommonDir, err := gitResolvedPath(ctx.cwd, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return false
@@ -79,6 +84,25 @@ func isCurrentRepoWorktreeCD(args []*syntax.Word, ctx evalContext) bool {
 	}
 
 	return currentCommonDir == targetCommonDir
+}
+
+func pathIsExistingDirWithinRepo(cwd, target string) bool {
+	repoRoot := repoRootForCwd(cwd)
+	if repoRoot == "" || target == "" {
+		return false
+	}
+
+	info, err := os.Stat(target)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+
+	rel, err := filepath.Rel(repoRoot, target)
+	if err != nil {
+		return false
+	}
+
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func repoRootForCwd(cwd string) string {

@@ -1135,6 +1135,7 @@ func TestCDApproval_CurrentRepoWorktreesOnly(t *testing.T) {
 	repo := initGitRepo(t)
 	linkedWorktree := filepath.Join(t.TempDir(), "feature-worktree")
 	runGit(t, repo, "worktree", "add", "-b", "feature", linkedWorktree, "HEAD")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "frontend"), 0o755))
 
 	t.Run("linked worktree from same repo is approved", func(t *testing.T) {
 		r := evaluateAllInDir("cd "+linkedWorktree, repo)
@@ -1147,6 +1148,13 @@ func TestCDApproval_CurrentRepoWorktreesOnly(t *testing.T) {
 		relativePath, err := filepath.Rel(repo, linkedWorktree)
 		require.NoError(t, err)
 		r := evaluateAllInDir("cd "+relativePath, repo)
+		require.NotNil(t, r)
+		assert.Equal(t, "cd", r.reason)
+		assert.Equal(t, decisionAllow, r.decision)
+	})
+
+	t.Run("repo subdir is approved", func(t *testing.T) {
+		r := evaluateAllInDir("cd frontend", repo)
 		require.NotNil(t, r)
 		assert.Equal(t, "cd", r.reason)
 		assert.Equal(t, decisionAllow, r.decision)
