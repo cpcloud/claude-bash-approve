@@ -33,7 +33,6 @@ func TestCurlReadOnly(t *testing.T) {
 		{"curl simple GET", "curl https://example.com", "curl"},
 		{"curl silent", "curl -s https://example.com", "curl"},
 		{"curl with flags", "curl -sL https://example.com", "curl"},
-		{"curl with output", "curl -o file.txt https://example.com", "curl"},
 		{"curl with timeout", "curl --max-time 30 https://example.com", "curl"},
 		{"curl with header", "curl -H 'Accept: application/json' https://example.com", "curl"},
 		{"curl with multiple flags", "curl -sSL --fail --max-time 10 https://example.com", "curl"},
@@ -74,6 +73,11 @@ func TestCurlWriteAsks(t *testing.T) {
 		{"curl combined flags with data", "curl -sLd 'payload' https://example.com"},
 		{"curl -XPOST no space", "curl -XPOST https://example.com"},
 		{"curl data equals", "curl --data=payload https://example.com"},
+
+		// -o / --output writes the response to a local file
+		{"curl -o short", "curl -o out.txt https://example.com"},
+		{"curl --output long", "curl --output out.txt https://example.com"},
+		{"curl combined -sLo", "curl -sLo out.txt https://example.com"},
 	}
 
 	for _, tt := range tests {

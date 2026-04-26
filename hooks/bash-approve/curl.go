@@ -110,7 +110,7 @@ var curlSpec = flagSpec{
 var curlReadOnlyFlags = map[string]bool{
 	"silent": true, "show-error": true, "location": true,
 	"insecure": true, "verbose": true, "head": true,
-	"get": true, "compressed": true, "output": true,
+	"get": true, "compressed": true,
 	"header": true, "user-agent": true, "cookie": true,
 	"max-time": true, "connect-timeout": true, "retry": true,
 	"retry-delay": true, "retry-max-time": true,
