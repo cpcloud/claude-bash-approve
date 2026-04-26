@@ -15,6 +15,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -555,8 +556,10 @@ func wordLiteral(w *syntax.Word) string {
 }
 
 // wordDecodedLiteral returns the shell-decoded literal of a word. ok is false
-// when the word contains parts that can't be decoded statically (CmdSubst,
-// ParamExp, ArithmExp), in which case s is the empty string.
+// when the word contains parts that can't be decoded statically (unknown
+// command substitutions, ParamExp, ArithmExp), in which case s is the empty
+// string. A small set of pure-string command substitutions (echo) is decoded
+// statically so common bypass attempts via $(echo -rf) get caught.
 func wordDecodedLiteral(w *syntax.Word) (s string, ok bool) {
 	if w == nil {
 		return "", true
@@ -580,11 +583,17 @@ func wordDecodedLiteral(w *syntax.Word) (s string, ok bool) {
 			if !dblQuotedDecodable(p) {
 				return "", false
 			}
-			decoded, err := expand.Literal(nil, &syntax.Word{Parts: []syntax.WordPart{p}})
+			decoded, err := expand.Literal(literalCfg, &syntax.Word{Parts: []syntax.WordPart{p}})
 			if err != nil {
 				return "", false
 			}
 			sb.WriteString(decoded)
+		case *syntax.CmdSubst:
+			val, ok := tryEvalCmdSubst(p)
+			if !ok {
+				return "", false
+			}
+			sb.WriteString(val)
 		default:
 			return "", false
 		}
@@ -592,14 +601,231 @@ func wordDecodedLiteral(w *syntax.Word) (s string, ok bool) {
 	return sb.String(), true
 }
 
+// errUnhandledCmdSubst signals that a command substitution can't be evaluated
+// statically. Used inside literalCfg.CmdSubst so expand.Literal aborts the
+// expansion of the enclosing word.
+var errUnhandledCmdSubst = errors.New("unhandled cmd subst")
+
+// literalCfg is the expand.Config used inside double-quoted contexts. It
+// delegates command substitutions to tryEvalCmdSubst so $(echo ...) inside
+// quotes decodes the same way as outside. Built in init() to break the
+// initialization cycle between the closure and tryEvalCmdSubst.
+var literalCfg *expand.Config
+
+func init() {
+	literalCfg = &expand.Config{
+		CmdSubst: func(w io.Writer, cs *syntax.CmdSubst) error {
+			val, ok := tryEvalCmdSubst(cs)
+			if !ok {
+				return errUnhandledCmdSubst
+			}
+			_, err := w.Write([]byte(val))
+			return err
+		},
+	}
+}
+
+// tryEvalCmdSubst statically evaluates a command substitution that consists
+// of a single, redirect-free call to a known pure-string command. Returns
+// ("", false) for anything else (fail-closed: unknown substitutions never
+// produce statically-decoded text; the caller falls back to the printed
+// source so substitutions stay opaque to regex matching).
+//
+// Output is returned as a single string with args space-joined. We do not
+// model bash IFS word splitting separately because the matching pipeline
+// regex-matches against a space-joined argv anyway — the deny patterns are
+// prefix matchers (e.g. `^rm\s+-r`), so a word boundary in the substitution
+// output is indistinguishable from a literal space at the regex level.
+func tryEvalCmdSubst(cs *syntax.CmdSubst) (string, bool) {
+	if cs == nil || len(cs.Stmts) != 1 {
+		return "", false
+	}
+	stmt := cs.Stmts[0]
+	if len(stmt.Redirs) > 0 || stmt.Cmd == nil {
+		return "", false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return "", false
+	}
+	name, ok := wordDecodedLiteral(call.Args[0])
+	if !ok {
+		return "", false
+	}
+	switch name {
+	case "echo":
+		return evalEchoArgs(call.Args[1:])
+	}
+	return "", false
+}
+
+// evalEchoArgs returns echo's stdout as bash would emit it, trimmed of the
+// trailing newline that command substitution would strip anyway. Leading
+// flag-only args matching -[neE]+ are consumed; -e enables backslash escape
+// interpretation, -E disables it (default), with the latest setting winning.
+// Once a non-flag arg appears, remaining args (including dash-prefixed ones)
+// are kept literally, with bash's echo backslash escapes decoded when -e is
+// active.
+func evalEchoArgs(args []*syntax.Word) (string, bool) {
+	skipFlags := true
+	decodeEscapes := false
+	parts := make([]string, 0, len(args))
+	for _, a := range args {
+		s, ok := wordDecodedLiteral(a)
+		if !ok {
+			return "", false
+		}
+		if skipFlags && isEchoFlag(s) {
+			for i := 1; i < len(s); i++ {
+				switch s[i] {
+				case 'e':
+					decodeEscapes = true
+				case 'E':
+					decodeEscapes = false
+				}
+			}
+			continue
+		}
+		skipFlags = false
+		if decodeEscapes {
+			decoded, suppress := decodeEchoBackslash(s)
+			parts = append(parts, decoded)
+			if suppress {
+				break
+			}
+			continue
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, " "), true
+}
+
+// isEchoFlag reports whether s is a leading echo option (-n, -e, -E, or any
+// concatenation thereof). bash's builtin echo treats anything else literally.
+func isEchoFlag(s string) bool {
+	if len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case 'n', 'e', 'E':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// decodeEchoBackslash applies bash `echo -e` backslash escape rules to s.
+// Recognized: \\, \a, \b, \c (suppress remaining), \e, \E, \f, \n, \r, \t,
+// \v, \0NNN (zero plus 0-3 octal digits), \xHH (1-2 hex digits). Unicode
+// escapes (\u, \U) and unrecognized escapes pass through unchanged — they
+// can't produce ASCII flag characters that would change matching. The
+// suppress return is true when \c was encountered; the caller must stop
+// emitting further arguments, since bash's echo \c truncates the entire
+// output stream, not just the current argument.
+func decodeEchoBackslash(s string) (out string, suppress bool) {
+	if !strings.Contains(s, "\\") {
+		return s, false
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] != '\\' || i+1 >= len(s) {
+			sb.WriteByte(s[i])
+			i++
+			continue
+		}
+		switch s[i+1] {
+		case '\\':
+			sb.WriteByte('\\')
+			i += 2
+		case 'a':
+			sb.WriteByte(0x07)
+			i += 2
+		case 'b':
+			sb.WriteByte(0x08)
+			i += 2
+		case 'c':
+			return sb.String(), true
+		case 'e', 'E':
+			sb.WriteByte(0x1b)
+			i += 2
+		case 'f':
+			sb.WriteByte(0x0c)
+			i += 2
+		case 'n':
+			sb.WriteByte(0x0a)
+			i += 2
+		case 'r':
+			sb.WriteByte(0x0d)
+			i += 2
+		case 't':
+			sb.WriteByte(0x09)
+			i += 2
+		case 'v':
+			sb.WriteByte(0x0b)
+			i += 2
+		case '0':
+			v, n := 0, 0
+			for n < 3 && i+2+n < len(s) && s[i+2+n] >= '0' && s[i+2+n] <= '7' {
+				v = v*8 + int(s[i+2+n]-'0')
+				n++
+			}
+			sb.WriteByte(byte(v))
+			i += 2 + n
+		case 'x':
+			v, n := 0, 0
+			for n < 2 && i+2+n < len(s) {
+				d := hexDigit(s[i+2+n])
+				if d < 0 {
+					break
+				}
+				v = v*16 + d
+				n++
+			}
+			if n == 0 {
+				sb.WriteByte('\\')
+				sb.WriteByte('x')
+				i += 2
+			} else {
+				sb.WriteByte(byte(v))
+				i += 2 + n
+			}
+		default:
+			sb.WriteByte('\\')
+			sb.WriteByte(s[i+1])
+			i += 2
+		}
+	}
+	return sb.String(), false
+}
+
+func hexDigit(b byte) int {
+	switch {
+	case b >= '0' && b <= '9':
+		return int(b - '0')
+	case b >= 'a' && b <= 'f':
+		return int(b-'a') + 10
+	case b >= 'A' && b <= 'F':
+		return int(b-'A') + 10
+	}
+	return -1
+}
+
 // dblQuotedDecodable reports whether all parts inside a *syntax.DblQuoted
-// node can be resolved statically: only Lit (text with backslash escapes).
-// ParamExp and ArithmExp would be evaluated against an empty environment
-// by expand.Literal, silently producing matches based on default values
+// node can be resolved statically: Lit (text with backslash escapes) and
+// CmdSubst (handled via literalCfg's CmdSubst handler). ParamExp and
+// ArithmExp would be evaluated against an empty environment by
+// expand.Literal, silently producing matches based on default values
 // instead of the real runtime — so we fall back to the printed source.
 func dblQuotedDecodable(d *syntax.DblQuoted) bool {
 	for _, part := range d.Parts {
-		if _, ok := part.(*syntax.Lit); !ok {
+		switch part.(type) {
+		case *syntax.Lit, *syntax.CmdSubst:
+			// resolvable
+		default:
 			return false
 		}
 	}

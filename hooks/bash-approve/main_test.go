@@ -1197,7 +1197,7 @@ func TestNoOpinionDecision(t *testing.T) {
 	})
 
 	// Quoting bypasses: shell decodes these to `rm -rf ...` at runtime,
-	// so the matcher must too.
+	// so the matcher must too. See main_test.go quoting cases below.
 	t.Run("rm with single-quoted flag denied", func(t *testing.T) {
 		r := evaluateAll("rm '-rf' /tmp/stuff")
 		require.NotNil(t, r)
@@ -1249,6 +1249,52 @@ func TestNoOpinionDecision(t *testing.T) {
 		assert.Equal(t, "deny", r.decision)
 	})
 
+	t.Run("rm with echo cmd-subst flag denied", func(t *testing.T) {
+		r := evaluateAll(`rm $(echo -rf) /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with echo cmd-subst quoted flag denied", func(t *testing.T) {
+		r := evaluateAll(`rm $(echo '-rf') /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with backtick echo flag denied", func(t *testing.T) {
+		r := evaluateAll("rm `echo -rf` /tmp/stuff")
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with double-quoted echo cmd-subst denied", func(t *testing.T) {
+		r := evaluateAll(`rm "$(echo -rf)" /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with echo -n flag prefix in cmd-subst denied", func(t *testing.T) {
+		// echo -n suppresses newline; -rf is the actual arg
+		r := evaluateAll(`rm $(echo -n -rf) /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with nested echo cmd-subst denied", func(t *testing.T) {
+		r := evaluateAll(`rm $(echo $(echo -rf)) /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with unknown cmd-subst stays no-opinion", func(t *testing.T) {
+		// Unknown command in $() should not be statically evaluated.
+		// The substitution check still validates the inner command;
+		// `date` is read-only so the inner is safe, but the matcher
+		// can't see what date prints, so the rm rule should not fire.
+		r := evaluateAll(`rm $(date) /tmp/stuff`)
+		assert.Nil(t, r, "unknown cmd-subst should not trigger rm -r deny")
+	})
+
 	t.Run("rm with param-exp default in double quotes stays no-opinion", func(t *testing.T) {
 		// "${RM_FLAGS:--rf}" must not decode to "-rf" against an empty
 		// env — the runtime value is unknown, so the matcher should
@@ -1265,6 +1311,70 @@ func TestNoOpinionDecision(t *testing.T) {
 	t.Run("rm with arithmetic exp in double quotes stays no-opinion", func(t *testing.T) {
 		r := evaluateAll(`rm "$((1))" /tmp/stuff`)
 		assert.Nil(t, r, "arithmetic exp inside double quotes should not trigger rm -r deny")
+	})
+
+	t.Run("rm with echo -e octal escape denied", func(t *testing.T) {
+		// echo -e '\055rf' decodes \055 as octal '-' → output "-rf"
+		r := evaluateAll(`rm $(echo -e '\055rf') /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with echo -e hex escape denied", func(t *testing.T) {
+		r := evaluateAll(`rm $(echo -e '\x2drf') /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with echo -ne hex escape denied", func(t *testing.T) {
+		// -ne combines -n (no newline) and -e (interpret escapes)
+		r := evaluateAll(`rm $(echo -ne '\x2drf') /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with echo without -e leaves escapes literal", func(t *testing.T) {
+		// Without -e, backslashes are literal — no flag for the rm
+		r := evaluateAll(`rm $(echo '\055rf') /tmp/stuff`)
+		assert.Nil(t, r, "echo without -e should leave escapes literal, no deny")
+	})
+
+	t.Run("rm with echo -eE escape disabled stays no-opinion", func(t *testing.T) {
+		// -e then -E: final state is disabled, escapes are literal
+		r := evaluateAll(`rm $(echo -eE '\055rf') /tmp/stuff`)
+		assert.Nil(t, r, "echo -eE leaves -E in effect, no escape decoding")
+	})
+
+	t.Run("rm with echo -e \\c suppresses remaining args", func(t *testing.T) {
+		// In bash, \c stops echo's output entirely — later args
+		// produce nothing. The static evaluator must do the same or
+		// it false-positives `rm  -rf /tmp/stuff` from no actual flag.
+		r := evaluateAll(`rm $(echo -e '\c' '-rf') /tmp/stuff`)
+		assert.Nil(t, r, "echo -e \\c suppresses output; rm should be no-opinion")
+	})
+
+	t.Run("rm with echo -e \\c mid-arg suppresses tail", func(t *testing.T) {
+		r := evaluateAll(`rm $(echo -e 'safe\c-rf') /tmp/stuff`)
+		assert.Nil(t, r, "echo -e text\\c-rf truncates at \\c")
+	})
+
+	t.Run("rm with echo -Ee escape enabled denied", func(t *testing.T) {
+		// -E then -e: final state is enabled
+		r := evaluateAll(`rm $(echo -Ee '\055rf') /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with echo separate -E -e flags last wins denied", func(t *testing.T) {
+		r := evaluateAll(`rm $(echo -E -e '\055rf') /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with echo dash-arg before flags treated literal", func(t *testing.T) {
+		// First non-flag arg ends option parsing; subsequent -e is literal.
+		r := evaluateAll(`rm $(echo first -e '\055rf') /tmp/stuff`)
+		assert.Nil(t, r, "options after first non-flag arg should not enable escapes")
 	})
 
 	t.Run("chain safe && rm -rf denied", func(t *testing.T) {
