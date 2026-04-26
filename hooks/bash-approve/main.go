@@ -290,12 +290,20 @@ func matchCommand(cmd string, commandPats []pattern) *pattern {
 }
 
 // checkSubstitutions walks an AST node for CmdSubst and ProcSubst,
-// recursively evaluating each inner command. Returns false if any inner
-// command is unsafe.
-func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandPats []pattern) bool {
-	safe := true
+// recursively evaluating each inner command. Returns the most-pessimistic
+// inner *result by decision priority (deny > ask > no-opinion > allow), or
+// nil if any substitution is unrecognized — the caller should reject the
+// outer command. A non-nil allow result means every substitution resolved
+// to allow; the caller continues with normal matching. Any other non-nil
+// decision should propagate as the outer command's decision so a
+// substitution can't smuggle a side-effecting command past the outer
+// rule's auto-approve, and ask/deny prompts/blocks reach the user with
+// the inner command's reason.
+func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandPats []pattern) *result {
+	var worst *result
+	rejected := false
 	syntax.Walk(node, func(n syntax.Node) bool {
-		if !safe {
+		if rejected {
 			return false
 		}
 		var stmts []*syntax.Stmt
@@ -305,19 +313,45 @@ func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandP
 		case *syntax.ProcSubst:
 			stmts = x.Stmts
 		}
-		if stmts != nil {
-			for _, stmt := range stmts {
-				r := evaluateStmt(stmt, ctx, wrapperPats, commandPats)
-				if r == nil || r.decision == decisionDeny {
-					safe = false
-					return false
-				}
-			}
-			return false // don't recurse into children, we handled stmts
+		if stmts == nil {
+			return true
 		}
-		return true
+		for _, stmt := range stmts {
+			r := evaluateStmt(stmt, ctx, wrapperPats, commandPats)
+			if r == nil {
+				rejected = true
+				return false
+			}
+			if worst == nil || decisionRank(r.decision) > decisionRank(worst.decision) {
+				worst = r
+			}
+		}
+		return false // don't recurse into children, we handled stmts
 	})
-	return safe
+	if rejected {
+		return nil
+	}
+	if worst == nil {
+		// No substitutions encountered — equivalent to allow.
+		return approved("")
+	}
+	return worst
+}
+
+// decisionRank orders decisions worst-first so the most-pessimistic
+// inner result wins when multiple substitutions live in one word.
+// deny > ask > no-opinion > allow.
+func decisionRank(d string) int {
+	switch d {
+	case decisionDeny:
+		return 3
+	case decisionAsk:
+		return 2
+	case decisionAllow:
+		return 0
+	default:
+		return 1
+	}
 }
 
 // evaluateStmt evaluates a single statement from the AST.
@@ -325,13 +359,13 @@ func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandP
 func evaluateStmt(stmt *syntax.Stmt, ctx evalContext, wrapperPats, commandPats []pattern) *result {
 	for _, redir := range stmt.Redirs {
 		if redir.Word != nil {
-			if !checkSubstitutions(redir.Word, ctx, wrapperPats, commandPats) {
-				return nil
+			if r, prop := substitutionPropagate(redir.Word, ctx, wrapperPats, commandPats); prop {
+				return r
 			}
 		}
 		if redir.Hdoc != nil {
-			if !checkSubstitutions(redir.Hdoc, ctx, wrapperPats, commandPats) {
-				return nil
+			if r, prop := substitutionPropagate(redir.Hdoc, ctx, wrapperPats, commandPats); prop {
+				return r
 			}
 		}
 	}
@@ -341,6 +375,22 @@ func evaluateStmt(stmt *syntax.Stmt, ctx evalContext, wrapperPats, commandPats [
 	}
 
 	return evaluateCommand(stmt.Cmd, ctx, wrapperPats, commandPats)
+}
+
+// substitutionPropagate adapts checkSubstitutions for callers that follow
+// the "reject or propagate or continue" pattern. Returns (r, true) if the
+// caller should return r (either nil for unrecognized, or a non-allow
+// result to propagate). Returns (nil, false) when every substitution is
+// allow and the caller can continue with its normal matching.
+func substitutionPropagate(node syntax.Node, ctx evalContext, wrapperPats, commandPats []pattern) (*result, bool) {
+	r := checkSubstitutions(node, ctx, wrapperPats, commandPats)
+	if r == nil {
+		return nil, true
+	}
+	if r.decision != decisionAllow {
+		return r, true
+	}
+	return nil, false
 }
 
 // evaluateCommand dispatches to the appropriate handler based on AST node type.
@@ -354,8 +404,8 @@ func evaluateCommand(cmd syntax.Command, ctx evalContext, wrapperPats, commandPa
 		// export, declare, local, readonly, typeset
 		return approved("shell vars")
 	case *syntax.ForClause:
-		if !checkForLoop(c.Loop, ctx, wrapperPats, commandPats) {
-			return nil
+		if r, prop := checkForLoop(c.Loop, ctx, wrapperPats, commandPats); prop {
+			return r
 		}
 		return evaluateBlock(c.Do, ctx, wrapperPats, commandPats, "for")
 	case *syntax.WhileClause:
@@ -363,6 +413,9 @@ func evaluateCommand(cmd syntax.Command, ctx evalContext, wrapperPats, commandPa
 			r := evaluateStmt(stmt, ctx, wrapperPats, commandPats)
 			if r == nil {
 				return nil
+			}
+			if r.decision != decisionAllow {
+				return r
 			}
 		}
 		return evaluateBlock(c.Do, ctx, wrapperPats, commandPats, "while")
@@ -435,6 +488,9 @@ func evaluateIfClause(ic *syntax.IfClause, ctx evalContext, wrapperPats, command
 		if r == nil {
 			return nil
 		}
+		if r.decision != decisionAllow {
+			return r
+		}
 	}
 	// Check then body
 	r := evaluateBlock(ic.Then, ctx, wrapperPats, commandPats, "if")
@@ -452,25 +508,27 @@ func evaluateIfClause(ic *syntax.IfClause, ctx evalContext, wrapperPats, command
 }
 
 // checkForLoop validates the iteration/condition of a for loop.
-// Returns false if any substitution inside the loop header is unsafe.
-func checkForLoop(loop syntax.Loop, ctx evalContext, wrapperPats, commandPats []pattern) bool {
+// Returns (r, true) when the outer command should be replaced by r —
+// either nil for unrecognized substitutions or a non-allow result to
+// propagate. Returns (nil, false) when every substitution is allow.
+func checkForLoop(loop syntax.Loop, ctx evalContext, wrapperPats, commandPats []pattern) (*result, bool) {
 	switch l := loop.(type) {
 	case *syntax.WordIter:
 		for _, word := range l.Items {
-			if !checkSubstitutions(word, ctx, wrapperPats, commandPats) {
-				return false
+			if r, prop := substitutionPropagate(word, ctx, wrapperPats, commandPats); prop {
+				return r, true
 			}
 		}
 	case *syntax.CStyleLoop:
 		for _, expr := range []syntax.ArithmExpr{l.Init, l.Cond, l.Post} {
 			if expr != nil {
-				if !checkSubstitutions(expr, ctx, wrapperPats, commandPats) {
-					return false
+				if r, prop := substitutionPropagate(expr, ctx, wrapperPats, commandPats); prop {
+					return r, true
 				}
 			}
 		}
 	}
-	return true
+	return nil, false
 }
 
 // evaluateBinaryCmd handles &&, ||, | chains.
@@ -504,8 +562,8 @@ func evaluateBinaryCmd(bc *syntax.BinaryCmd, ctx evalContext, wrapperPats, comma
 func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, commandPats []pattern) *result {
 	// Standalone variable assignment: FOO=bar (no command)
 	if len(call.Args) == 0 && len(call.Assigns) > 0 {
-		if !checkSubstitutions(call, ctx, wrapperPats, commandPats) {
-			return nil
+		if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
+			return r
 		}
 		return approved("var assignment")
 	}
@@ -519,20 +577,26 @@ func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, comma
 	if cmdName == "" {
 		resolved, knownSafe := resolveWhichSubst(call.Args[0])
 		if resolved == "" {
+			// Dynamic command name we can't match. A deny/ask inside
+			// the substitution should still propagate so the user sees
+			// the inner command's prompt or block.
+			if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
+				return r
+			}
 			return nil
 		}
 		if knownSafe {
 			// $(which X) / $(command -v X) — inherently safe, only check remaining args
 			for _, arg := range call.Args[1:] {
-				if !checkSubstitutions(arg, ctx, wrapperPats, commandPats) {
-					return nil
+				if r, prop := substitutionPropagate(arg, ctx, wrapperPats, commandPats); prop {
+					return r
 				}
 			}
 		} else {
 			// $(...)/path/to/cmd — must verify the inner substitution is safe too
 			for _, arg := range call.Args {
-				if !checkSubstitutions(arg, ctx, wrapperPats, commandPats) {
-					return nil
+				if r, prop := substitutionPropagate(arg, ctx, wrapperPats, commandPats); prop {
+					return r
 				}
 			}
 		}
@@ -540,8 +604,8 @@ func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, comma
 	}
 
 	// Normal path: check all substitutions
-	if !checkSubstitutions(call, ctx, wrapperPats, commandPats) {
-		return nil
+	if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
+		return r
 	}
 
 	return matchAndBuild(argsText(call.Args), nil, call.Assigns, call.Args, ctx, wrapperPats, commandPats)
