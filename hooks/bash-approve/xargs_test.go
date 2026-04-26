@@ -76,6 +76,10 @@ func TestXargsUnsafe(t *testing.T) {
 		{"xargs single-quoted rm", "xargs 'rm'"},
 		{"xargs ANSI-C-quoted rm", `xargs $'rm'`},
 		{"xargs backslash rm", `xargs \rm`},
+
+		// argv boundary — single quoted argv element with embedded
+		// space must not be reassembled as two argv elements.
+		{"xargs quoted command with space", `xargs 'git status'`},
 	}
 
 	for _, tt := range tests {

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"strings"
-
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -46,7 +44,7 @@ func isFindSafe(args []*syntax.Word, ctx evalContext) bool {
 		// find -exec git diff {} \;
 		//            ^^^^^^^^^^ this part
 		i++
-		var cmdParts []string
+		var cmdWords []*syntax.Word
 		for i < len(args) {
 			part := wordLiteral(args[i])
 			if part == "" {
@@ -56,16 +54,19 @@ func isFindSafe(args []*syntax.Word, ctx evalContext) bool {
 			if part == ";" || part == `\;` || part == "+" {
 				break
 			}
-			cmdParts = append(cmdParts, part)
+			cmdWords = append(cmdWords, args[i])
 			i++
 		}
 
-		if len(cmdParts) == 0 {
+		if len(cmdWords) == 0 {
 			return false // -exec with no command
 		}
 
 		// Evaluate the embedded command through the normal pipeline.
-		cmd := strings.Join(cmdParts, " ")
+		// argsText preserves argv boundaries via wordMatchText so a
+		// quoted argv element with embedded whitespace can't be
+		// reinterpreted as multiple words after re-parsing.
+		cmd := argsText(cmdWords)
 		r := evaluate(cmd, ctx, wrapperPatterns(), commandPatterns())
 		if r == nil {
 			return false // unknown command

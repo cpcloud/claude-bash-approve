@@ -32,7 +32,6 @@ func isXargsSafe(args []*syntax.Word, ctx evalContext) bool {
 	}
 
 	// Skip xargs flags to find the command it will execute.
-	var cmdParts []string
 	i := 1 // skip "xargs" at args[0]
 	for i < len(args) {
 		lit := wordLiteral(args[i])
@@ -65,19 +64,22 @@ func isXargsSafe(args []*syntax.Word, ctx evalContext) bool {
 	}
 
 	// Everything from i onward is the command xargs will run
+	var cmdWords []*syntax.Word
 	for j := i; j < len(args); j++ {
-		lit := wordLiteral(args[j])
-		if lit == "" {
+		if wordLiteral(args[j]) == "" {
 			return false // non-literal in command — can't validate
 		}
-		cmdParts = append(cmdParts, lit)
+		cmdWords = append(cmdWords, args[j])
 	}
 
-	if len(cmdParts) == 0 {
+	if len(cmdWords) == 0 {
 		return true // xargs with no command defaults to echo
 	}
 
-	cmd := strings.Join(cmdParts, " ")
+	// argsText preserves argv boundaries via wordMatchText so a quoted
+	// argv element with embedded whitespace can't be reinterpreted as
+	// multiple words after re-parsing.
+	cmd := argsText(cmdWords)
 	r := evaluate(cmd, ctx, wrapperPatterns(), commandPatterns())
 	if r == nil {
 		return false

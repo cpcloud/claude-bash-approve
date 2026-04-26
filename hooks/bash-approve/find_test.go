@@ -89,6 +89,10 @@ func TestFindUnsafe(t *testing.T) {
 		{"find exec single-quoted rm", `find . -exec 'rm' {} \;`},
 		{"find exec ANSI-C-quoted rm", `find . -exec $'rm' {} \;`},
 		{"find exec backslash rm", `find . -exec \rm {} \;`},
+
+		// argv boundary — single quoted argv element with embedded
+		// space must not be reassembled as two argv elements.
+		{"find exec quoted command with space", `find . -exec 'git status' {} \;`},
 	}
 
 	for _, tt := range tests {
