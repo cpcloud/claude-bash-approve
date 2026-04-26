@@ -15,6 +15,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v4"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -206,15 +208,58 @@ func buildPiErrorOutput(code, message string) PiOutput {
 	}
 }
 
-// argsText prints CallExpr args to a flat string for regex matching.
+// argsText flattens CallExpr args to a string for regex matching. Each word is
+// decoded as the shell would (quote stripping, backslash escapes, ANSI-C
+// $'...'); words with dynamic parts (CmdSubst, ParamExp) fall back to the
+// printed source so substitution-aware logic still sees them.
 func argsText(args []*syntax.Word) string {
 	parts := make([]string, 0, len(args))
 	for _, w := range args {
-		var buf bytes.Buffer
-		_ = shPrinter.Print(&buf, w)
-		parts = append(parts, buf.String())
+		parts = append(parts, wordMatchText(w))
 	}
 	return strings.Join(parts, " ")
+}
+
+// wordMatchText returns the shell-decoded literal of a word, or the printed
+// source when the word contains dynamic expansions. Single-element words
+// whose decoded form contains shell whitespace also fall back to the
+// printed source: argsText joins decoded words with spaces, so passing
+// `'git status'` (one argv element with embedded space) through as
+// `git status` would let the matcher mistake it for two argv elements
+// and approve it as a git read op. Whitespace that originates from a
+// top-level CmdSubst is not subject to the fallback, since that
+// whitespace is the IFS argv boundary bash would split on.
+func wordMatchText(w *syntax.Word) string {
+	if decoded, ok := wordDecodedLiteral(w); ok {
+		if !hasNonCmdSubstWhitespace(w) {
+			return decoded
+		}
+	}
+	var buf bytes.Buffer
+	_ = shPrinter.Print(&buf, w)
+	return buf.String()
+}
+
+// hasNonCmdSubstWhitespace reports whether any part of the word other
+// than a top-level CmdSubst decodes to a string containing shell
+// whitespace. Such whitespace is part of one argv element and would
+// create false word boundaries if joined into the matcher's argv string.
+func hasNonCmdSubstWhitespace(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, part := range w.Parts {
+		if _, ok := part.(*syntax.CmdSubst); ok {
+			continue
+		}
+		single := &syntax.Word{Parts: []syntax.WordPart{part}}
+		if decoded, ok := wordDecodedLiteral(single); ok {
+			if strings.ContainsAny(decoded, " \t\n\r\v\f") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func stripWrappers(cmd string, wrapperPats []pattern) (string, []string) {
@@ -245,12 +290,20 @@ func matchCommand(cmd string, commandPats []pattern) *pattern {
 }
 
 // checkSubstitutions walks an AST node for CmdSubst and ProcSubst,
-// recursively evaluating each inner command. Returns false if any inner
-// command is unsafe.
-func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandPats []pattern) bool {
-	safe := true
+// recursively evaluating each inner command. Returns the most-pessimistic
+// inner *result by decision priority (deny > ask > no-opinion > allow), or
+// nil if any substitution is unrecognized — the caller should reject the
+// outer command. A non-nil allow result means every substitution resolved
+// to allow; the caller continues with normal matching. Any other non-nil
+// decision should propagate as the outer command's decision so a
+// substitution can't smuggle a side-effecting command past the outer
+// rule's auto-approve, and ask/deny prompts/blocks reach the user with
+// the inner command's reason.
+func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandPats []pattern) *result {
+	var worst *result
+	rejected := false
 	syntax.Walk(node, func(n syntax.Node) bool {
-		if !safe {
+		if rejected {
 			return false
 		}
 		var stmts []*syntax.Stmt
@@ -260,19 +313,45 @@ func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandP
 		case *syntax.ProcSubst:
 			stmts = x.Stmts
 		}
-		if stmts != nil {
-			for _, stmt := range stmts {
-				r := evaluateStmt(stmt, ctx, wrapperPats, commandPats)
-				if r == nil || r.decision == decisionDeny {
-					safe = false
-					return false
-				}
-			}
-			return false // don't recurse into children, we handled stmts
+		if stmts == nil {
+			return true
 		}
-		return true
+		for _, stmt := range stmts {
+			r := evaluateStmt(stmt, ctx, wrapperPats, commandPats)
+			if r == nil {
+				rejected = true
+				return false
+			}
+			if worst == nil || decisionRank(r.decision) > decisionRank(worst.decision) {
+				worst = r
+			}
+		}
+		return false // don't recurse into children, we handled stmts
 	})
-	return safe
+	if rejected {
+		return nil
+	}
+	if worst == nil {
+		// No substitutions encountered — equivalent to allow.
+		return approved("")
+	}
+	return worst
+}
+
+// decisionRank orders decisions worst-first so the most-pessimistic
+// inner result wins when multiple substitutions live in one word.
+// deny > ask > no-opinion > allow.
+func decisionRank(d string) int {
+	switch d {
+	case decisionDeny:
+		return 3
+	case decisionAsk:
+		return 2
+	case decisionAllow:
+		return 0
+	default:
+		return 1
+	}
 }
 
 // evaluateStmt evaluates a single statement from the AST.
@@ -280,13 +359,13 @@ func checkSubstitutions(node syntax.Node, ctx evalContext, wrapperPats, commandP
 func evaluateStmt(stmt *syntax.Stmt, ctx evalContext, wrapperPats, commandPats []pattern) *result {
 	for _, redir := range stmt.Redirs {
 		if redir.Word != nil {
-			if !checkSubstitutions(redir.Word, ctx, wrapperPats, commandPats) {
-				return nil
+			if r, prop := substitutionPropagate(redir.Word, ctx, wrapperPats, commandPats); prop {
+				return r
 			}
 		}
 		if redir.Hdoc != nil {
-			if !checkSubstitutions(redir.Hdoc, ctx, wrapperPats, commandPats) {
-				return nil
+			if r, prop := substitutionPropagate(redir.Hdoc, ctx, wrapperPats, commandPats); prop {
+				return r
 			}
 		}
 	}
@@ -296,6 +375,22 @@ func evaluateStmt(stmt *syntax.Stmt, ctx evalContext, wrapperPats, commandPats [
 	}
 
 	return evaluateCommand(stmt.Cmd, ctx, wrapperPats, commandPats)
+}
+
+// substitutionPropagate adapts checkSubstitutions for callers that follow
+// the "reject or propagate or continue" pattern. Returns (r, true) if the
+// caller should return r (either nil for unrecognized, or a non-allow
+// result to propagate). Returns (nil, false) when every substitution is
+// allow and the caller can continue with its normal matching.
+func substitutionPropagate(node syntax.Node, ctx evalContext, wrapperPats, commandPats []pattern) (*result, bool) {
+	r := checkSubstitutions(node, ctx, wrapperPats, commandPats)
+	if r == nil {
+		return nil, true
+	}
+	if r.decision != decisionAllow {
+		return r, true
+	}
+	return nil, false
 }
 
 // evaluateCommand dispatches to the appropriate handler based on AST node type.
@@ -309,8 +404,8 @@ func evaluateCommand(cmd syntax.Command, ctx evalContext, wrapperPats, commandPa
 		// export, declare, local, readonly, typeset
 		return approved("shell vars")
 	case *syntax.ForClause:
-		if !checkForLoop(c.Loop, ctx, wrapperPats, commandPats) {
-			return nil
+		if r, prop := checkForLoop(c.Loop, ctx, wrapperPats, commandPats); prop {
+			return r
 		}
 		return evaluateBlock(c.Do, ctx, wrapperPats, commandPats, "for")
 	case *syntax.WhileClause:
@@ -318,6 +413,9 @@ func evaluateCommand(cmd syntax.Command, ctx evalContext, wrapperPats, commandPa
 			r := evaluateStmt(stmt, ctx, wrapperPats, commandPats)
 			if r == nil {
 				return nil
+			}
+			if r.decision != decisionAllow {
+				return r
 			}
 		}
 		return evaluateBlock(c.Do, ctx, wrapperPats, commandPats, "while")
@@ -390,6 +488,9 @@ func evaluateIfClause(ic *syntax.IfClause, ctx evalContext, wrapperPats, command
 		if r == nil {
 			return nil
 		}
+		if r.decision != decisionAllow {
+			return r
+		}
 	}
 	// Check then body
 	r := evaluateBlock(ic.Then, ctx, wrapperPats, commandPats, "if")
@@ -407,25 +508,27 @@ func evaluateIfClause(ic *syntax.IfClause, ctx evalContext, wrapperPats, command
 }
 
 // checkForLoop validates the iteration/condition of a for loop.
-// Returns false if any substitution inside the loop header is unsafe.
-func checkForLoop(loop syntax.Loop, ctx evalContext, wrapperPats, commandPats []pattern) bool {
+// Returns (r, true) when the outer command should be replaced by r —
+// either nil for unrecognized substitutions or a non-allow result to
+// propagate. Returns (nil, false) when every substitution is allow.
+func checkForLoop(loop syntax.Loop, ctx evalContext, wrapperPats, commandPats []pattern) (*result, bool) {
 	switch l := loop.(type) {
 	case *syntax.WordIter:
 		for _, word := range l.Items {
-			if !checkSubstitutions(word, ctx, wrapperPats, commandPats) {
-				return false
+			if r, prop := substitutionPropagate(word, ctx, wrapperPats, commandPats); prop {
+				return r, true
 			}
 		}
 	case *syntax.CStyleLoop:
 		for _, expr := range []syntax.ArithmExpr{l.Init, l.Cond, l.Post} {
 			if expr != nil {
-				if !checkSubstitutions(expr, ctx, wrapperPats, commandPats) {
-					return false
+				if r, prop := substitutionPropagate(expr, ctx, wrapperPats, commandPats); prop {
+					return r, true
 				}
 			}
 		}
 	}
-	return true
+	return nil, false
 }
 
 // evaluateBinaryCmd handles &&, ||, | chains.
@@ -459,8 +562,8 @@ func evaluateBinaryCmd(bc *syntax.BinaryCmd, ctx evalContext, wrapperPats, comma
 func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, commandPats []pattern) *result {
 	// Standalone variable assignment: FOO=bar (no command)
 	if len(call.Args) == 0 && len(call.Assigns) > 0 {
-		if !checkSubstitutions(call, ctx, wrapperPats, commandPats) {
-			return nil
+		if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
+			return r
 		}
 		return approved("var assignment")
 	}
@@ -474,20 +577,26 @@ func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, comma
 	if cmdName == "" {
 		resolved, knownSafe := resolveWhichSubst(call.Args[0])
 		if resolved == "" {
+			// Dynamic command name we can't match. A deny/ask inside
+			// the substitution should still propagate so the user sees
+			// the inner command's prompt or block.
+			if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
+				return r
+			}
 			return nil
 		}
 		if knownSafe {
 			// $(which X) / $(command -v X) — inherently safe, only check remaining args
 			for _, arg := range call.Args[1:] {
-				if !checkSubstitutions(arg, ctx, wrapperPats, commandPats) {
-					return nil
+				if r, prop := substitutionPropagate(arg, ctx, wrapperPats, commandPats); prop {
+					return r
 				}
 			}
 		} else {
 			// $(...)/path/to/cmd — must verify the inner substitution is safe too
 			for _, arg := range call.Args {
-				if !checkSubstitutions(arg, ctx, wrapperPats, commandPats) {
-					return nil
+				if r, prop := substitutionPropagate(arg, ctx, wrapperPats, commandPats); prop {
+					return r
 				}
 			}
 		}
@@ -495,8 +604,8 @@ func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, comma
 	}
 
 	// Normal path: check all substitutions
-	if !checkSubstitutions(call, ctx, wrapperPats, commandPats) {
-		return nil
+	if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
+		return r
 	}
 
 	return matchAndBuild(argsText(call.Args), nil, call.Assigns, call.Args, ctx, wrapperPats, commandPats)
@@ -528,28 +637,310 @@ func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.A
 	return &result{reason: reason, decision: matched.decision, denyReason: matched.denyReason}
 }
 
-// wordLiteral returns the literal string value of a word if it contains no
-// expansions (parameter expansion, command substitution, etc.). Returns ""
-// if the word is dynamic.
+// wordLiteral returns the shell-decoded literal value of a word, or "" if the
+// word contains dynamic expansions (parameter expansion, command substitution,
+// arithmetic). It strips unquoted backslash escapes, decodes ANSI-C $'...'
+// sequences, and unwraps single and double quotes — matching what the shell
+// would produce in argv.
 func wordLiteral(w *syntax.Word) string {
+	s, ok := wordDecodedLiteral(w)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// wordDecodedLiteral returns the shell-decoded literal of a word. ok is false
+// when the word contains parts that can't be decoded statically (unknown
+// command substitutions, ParamExp, ArithmExp), in which case s is the empty
+// string. A small set of pure-string command substitutions (echo) is decoded
+// statically so common bypass attempts via $(echo -rf) get caught.
+func wordDecodedLiteral(w *syntax.Word) (s string, ok bool) {
+	if w == nil {
+		return "", true
+	}
 	var sb strings.Builder
 	for _, part := range w.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			sb.WriteString(p.Value)
+			sb.WriteString(stripUnquotedBackslashes(p.Value))
 		case *syntax.SglQuoted:
-			sb.WriteString(p.Value)
+			if p.Dollar {
+				decoded, err := expand.Literal(nil, &syntax.Word{Parts: []syntax.WordPart{p}})
+				if err != nil {
+					return "", false
+				}
+				sb.WriteString(decoded)
+			} else {
+				sb.WriteString(p.Value)
+			}
 		case *syntax.DblQuoted:
-			for _, dp := range p.Parts {
-				if lit, ok := dp.(*syntax.Lit); ok {
-					sb.WriteString(lit.Value)
-				} else {
-					return ""
+			if !dblQuotedDecodable(p) {
+				return "", false
+			}
+			decoded, err := expand.Literal(literalCfg, &syntax.Word{Parts: []syntax.WordPart{p}})
+			if err != nil {
+				return "", false
+			}
+			sb.WriteString(decoded)
+		case *syntax.CmdSubst:
+			val, ok := tryEvalCmdSubst(p)
+			if !ok {
+				return "", false
+			}
+			sb.WriteString(val)
+		default:
+			return "", false
+		}
+	}
+	return sb.String(), true
+}
+
+// errUnhandledCmdSubst signals that a command substitution can't be evaluated
+// statically. Used inside literalCfg.CmdSubst so expand.Literal aborts the
+// expansion of the enclosing word.
+var errUnhandledCmdSubst = errors.New("unhandled cmd subst")
+
+// literalCfg is the expand.Config used inside double-quoted contexts. It
+// delegates command substitutions to tryEvalCmdSubst so $(echo ...) inside
+// quotes decodes the same way as outside. Built in init() to break the
+// initialization cycle between the closure and tryEvalCmdSubst.
+var literalCfg *expand.Config
+
+func init() {
+	literalCfg = &expand.Config{
+		CmdSubst: func(w io.Writer, cs *syntax.CmdSubst) error {
+			val, ok := tryEvalCmdSubst(cs)
+			if !ok {
+				return errUnhandledCmdSubst
+			}
+			_, err := w.Write([]byte(val))
+			return err
+		},
+	}
+}
+
+// tryEvalCmdSubst statically evaluates a command substitution that consists
+// of a single, redirect-free call to a known pure-string command. Returns
+// ("", false) for anything else (fail-closed: unknown substitutions never
+// produce statically-decoded text; the caller falls back to the printed
+// source so substitutions stay opaque to regex matching).
+//
+// Output is returned as a single string with args space-joined. We do not
+// model bash IFS word splitting separately because the matching pipeline
+// regex-matches against a space-joined argv anyway — the deny patterns are
+// prefix matchers (e.g. `^rm\s+-r`), so a word boundary in the substitution
+// output is indistinguishable from a literal space at the regex level.
+func tryEvalCmdSubst(cs *syntax.CmdSubst) (string, bool) {
+	if cs == nil || len(cs.Stmts) != 1 {
+		return "", false
+	}
+	stmt := cs.Stmts[0]
+	if len(stmt.Redirs) > 0 || stmt.Cmd == nil {
+		return "", false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return "", false
+	}
+	name, ok := wordDecodedLiteral(call.Args[0])
+	if !ok {
+		return "", false
+	}
+	switch name {
+	case "echo":
+		return evalEchoArgs(call.Args[1:])
+	}
+	return "", false
+}
+
+// evalEchoArgs returns echo's stdout as bash would emit it, trimmed of the
+// trailing newline that command substitution would strip anyway. Leading
+// flag-only args matching -[neE]+ are consumed; -e enables backslash escape
+// interpretation, -E disables it (default), with the latest setting winning.
+// Once a non-flag arg appears, remaining args (including dash-prefixed ones)
+// are kept literally, with bash's echo backslash escapes decoded when -e is
+// active.
+func evalEchoArgs(args []*syntax.Word) (string, bool) {
+	skipFlags := true
+	decodeEscapes := false
+	parts := make([]string, 0, len(args))
+	for _, a := range args {
+		s, ok := wordDecodedLiteral(a)
+		if !ok {
+			return "", false
+		}
+		if skipFlags && isEchoFlag(s) {
+			for i := 1; i < len(s); i++ {
+				switch s[i] {
+				case 'e':
+					decodeEscapes = true
+				case 'E':
+					decodeEscapes = false
 				}
 			}
-		default:
-			return ""
+			continue
 		}
+		skipFlags = false
+		if decodeEscapes {
+			decoded, suppress := decodeEchoBackslash(s)
+			parts = append(parts, decoded)
+			if suppress {
+				break
+			}
+			continue
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, " "), true
+}
+
+// isEchoFlag reports whether s is a leading echo option (-n, -e, -E, or any
+// concatenation thereof). bash's builtin echo treats anything else literally.
+func isEchoFlag(s string) bool {
+	if len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case 'n', 'e', 'E':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// decodeEchoBackslash applies bash `echo -e` backslash escape rules to s.
+// Recognized: \\, \a, \b, \c (suppress remaining), \e, \E, \f, \n, \r, \t,
+// \v, \0NNN (zero plus 0-3 octal digits), \xHH (1-2 hex digits). Unicode
+// escapes (\u, \U) and unrecognized escapes pass through unchanged — they
+// can't produce ASCII flag characters that would change matching. The
+// suppress return is true when \c was encountered; the caller must stop
+// emitting further arguments, since bash's echo \c truncates the entire
+// output stream, not just the current argument.
+func decodeEchoBackslash(s string) (out string, suppress bool) {
+	if !strings.Contains(s, "\\") {
+		return s, false
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] != '\\' || i+1 >= len(s) {
+			sb.WriteByte(s[i])
+			i++
+			continue
+		}
+		switch s[i+1] {
+		case '\\':
+			sb.WriteByte('\\')
+			i += 2
+		case 'a':
+			sb.WriteByte(0x07)
+			i += 2
+		case 'b':
+			sb.WriteByte(0x08)
+			i += 2
+		case 'c':
+			return sb.String(), true
+		case 'e', 'E':
+			sb.WriteByte(0x1b)
+			i += 2
+		case 'f':
+			sb.WriteByte(0x0c)
+			i += 2
+		case 'n':
+			sb.WriteByte(0x0a)
+			i += 2
+		case 'r':
+			sb.WriteByte(0x0d)
+			i += 2
+		case 't':
+			sb.WriteByte(0x09)
+			i += 2
+		case 'v':
+			sb.WriteByte(0x0b)
+			i += 2
+		case '0':
+			v, n := 0, 0
+			for n < 3 && i+2+n < len(s) && s[i+2+n] >= '0' && s[i+2+n] <= '7' {
+				v = v*8 + int(s[i+2+n]-'0')
+				n++
+			}
+			sb.WriteByte(byte(v))
+			i += 2 + n
+		case 'x':
+			v, n := 0, 0
+			for n < 2 && i+2+n < len(s) {
+				d := hexDigit(s[i+2+n])
+				if d < 0 {
+					break
+				}
+				v = v*16 + d
+				n++
+			}
+			if n == 0 {
+				sb.WriteByte('\\')
+				sb.WriteByte('x')
+				i += 2
+			} else {
+				sb.WriteByte(byte(v))
+				i += 2 + n
+			}
+		default:
+			sb.WriteByte('\\')
+			sb.WriteByte(s[i+1])
+			i += 2
+		}
+	}
+	return sb.String(), false
+}
+
+func hexDigit(b byte) int {
+	switch {
+	case b >= '0' && b <= '9':
+		return int(b - '0')
+	case b >= 'a' && b <= 'f':
+		return int(b-'a') + 10
+	case b >= 'A' && b <= 'F':
+		return int(b-'A') + 10
+	}
+	return -1
+}
+
+// dblQuotedDecodable reports whether all parts inside a *syntax.DblQuoted
+// node can be resolved statically: Lit (text with backslash escapes) and
+// CmdSubst (handled via literalCfg's CmdSubst handler). ParamExp and
+// ArithmExp would be evaluated against an empty environment by
+// expand.Literal, silently producing matches based on default values
+// instead of the real runtime — so we fall back to the printed source.
+func dblQuotedDecodable(d *syntax.DblQuoted) bool {
+	for _, part := range d.Parts {
+		switch part.(type) {
+		case *syntax.Lit, *syntax.CmdSubst:
+			// resolvable
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// stripUnquotedBackslashes drops backslash escapes from an unquoted shell
+// literal: "\X" becomes "X". The mvdan/sh parser already removes line
+// continuations, so we don't need to handle "\<newline>" here.
+func stripUnquotedBackslashes(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		sb.WriteByte(s[i])
 	}
 	return sb.String()
 }
