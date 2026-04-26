@@ -23,6 +23,28 @@ var xargsBoolFlags = map[string]bool{
 	"--process-slot-var": true,
 }
 
+// xargsSafeAppendCommands are commands where xargs's default behaviour
+// (appending each input record as additional positional arguments) does
+// not change the approval decision. Anything outside this set with no
+// -I asks; that catches `xargs touch`, `xargs mkdir`, `xargs gh issue
+// close`, and similar invocations where an attacker-controlled
+// positional argument changes what the command does.
+//
+// `less`, `more`, `yq` are intentionally NOT here. less and more accept
+// output-file options; yq has --inplace; any of those turns a runtime-
+// controlled appended record into a filesystem write.
+var xargsSafeAppendCommands = map[string]bool{
+	"cat": true, "head": true, "tail": true,
+	"wc": true, "file": true, "stat": true,
+	"grep": true, "rg": true, "egrep": true, "fgrep": true,
+	"jq": true,
+	"md5sum": true, "sha256sum": true, "sha1sum": true, "shasum": true,
+	"xxd": true, "od": true, "hexdump": true,
+	"echo": true, "printf": true, "true": true, "false": true,
+	"ls": true, "diff": true,
+	"basename": true, "dirname": true, "realpath": true, "readlink": true,
+}
+
 // isXargsSafe validates an xargs invocation by extracting the command
 // that xargs will run and evaluating it through the normal pipeline.
 // args includes the command name at args[0].
@@ -31,19 +53,25 @@ func isXargsSafe(args []*syntax.Word, ctx evalContext) bool {
 		return true // bare xargs with no args — reads stdin, echo by default
 	}
 
-	// Skip xargs flags to find the command it will execute.
-	i := 1 // skip "xargs" at args[0]
+	replacementToken := ""
+	i := 1
 	for i < len(args) {
 		lit := wordLiteral(args[i])
 		if lit == "" {
-			return false // non-literal arg — can't validate
+			return false
 		}
 
 		// --flag=value
 		if strings.HasPrefix(lit, "--") {
-			if k, _, ok := strings.Cut(lit, "="); ok {
+			if k, v, ok := strings.Cut(lit, "="); ok {
 				if !xargsValueFlags[k] && !xargsBoolFlags[k] {
-					break // not a known xargs flag — start of command
+					break
+				}
+				if k == "--replace" {
+					replacementToken = v
+					if replacementToken == "" {
+						replacementToken = "{}"
+					}
 				}
 				i++
 				continue
@@ -55,32 +83,66 @@ func isXargsSafe(args []*syntax.Word, ctx evalContext) bool {
 			continue
 		}
 		if xargsValueFlags[lit] {
-			i += 2 // skip flag + its value
+			if lit == "-I" || lit == "--replace" {
+				if i+1 < len(args) {
+					replacementToken = wordLiteral(args[i+1])
+				}
+				if replacementToken == "" {
+					replacementToken = "{}"
+				}
+			}
+			i += 2
 			continue
 		}
 
-		// Not a known xargs flag — this is the start of the command
+		// Attached short option: `-I{}` / `-Ifoo` — xargs accepts the
+		// value glued to the flag.
+		if strings.HasPrefix(lit, "-I") && len(lit) > 2 {
+			replacementToken = lit[2:]
+			i++
+			continue
+		}
+
 		break
 	}
 
-	// Everything from i onward is the command xargs will run
+	// Everything from i onward is the command xargs will run.
 	var cmdWords []*syntax.Word
+	var cmdLits []string
 	for j := i; j < len(args); j++ {
-		if wordLiteral(args[j]) == "" {
-			return false // non-literal in command — can't validate
+		lit := wordLiteral(args[j])
+		if lit == "" {
+			return false
 		}
 		cmdWords = append(cmdWords, args[j])
+		cmdLits = append(cmdLits, lit)
 	}
 
 	if len(cmdWords) == 0 {
-		return true // xargs with no command defaults to echo
+		return true
 	}
 
-	// argsText preserves argv boundaries via wordMatchText so a quoted
-	// argv element with embedded whitespace can't be reinterpreted as
-	// multiple words after re-parsing.
+	// xargs replaces every occurrence of the -I/--replace token with
+	// each input record at runtime, so a literal `tee {}` template
+	// would clobber arbitrary input-controlled paths the validator
+	// cannot model. Treat any template containing the token as ask.
+	if replacementToken != "" {
+		for _, p := range cmdLits {
+			if strings.Contains(p, replacementToken) {
+				return false
+			}
+		}
+	} else if !xargsSafeAppendCommands[cmdLits[0]] {
+		// No -I/--replace: xargs appends each input record as
+		// additional positional arguments. For commands not in the
+		// safe-append list, that runtime-controlled tail can change
+		// the approval decision (e.g. `xargs touch`, `xargs mkdir`),
+		// so ask defensively.
+		return false
+	}
+
 	cmd := argsText(cmdWords)
-	r := evaluate(cmd, ctx, wrapperPatterns(), commandPatterns())
+	r := evaluate(cmd, ctx, ctx.wrapperPats, ctx.commandPats)
 	if r == nil {
 		return false
 	}

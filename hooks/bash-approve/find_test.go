@@ -24,26 +24,11 @@ func TestFindSafe(t *testing.T) {
 		{"find with size", "find . -size +1M -type f", "find"},
 		{"find with mtime", "find . -mtime -7 -name '*.log'", "find"},
 
-		// -exec with safe commands
-		{"find exec safe cmd", "find . -name '*.go' -exec wc -l {} \\;", "find"},
-		{"find exec git diff", "find . -name '*.go' -exec git diff {} \\;", "find"},
-		{"find exec with echo", "find . -type f -exec echo {} \\;", "find"},
-		{"find exec cat", "find . -name 'README*' -exec cat {} \\;", "find"},
-		{"find exec head", "find . -name '*.log' -exec head -20 {} \\;", "find"},
-		{"find exec grep", "find . -name '*.py' -exec grep -l TODO {} \\;", "find"},
-
-		// -execdir with safe commands
-		{"find execdir safe", "find . -name '*.py' -execdir grep TODO {} +", "find"},
-		{"find execdir cat", "find . -name '*.md' -execdir cat {} \\;", "find"},
-
-		// + terminator (batch mode)
-		{"find exec batch", "find . -name '*.go' -exec wc -l {} +", "find"},
-
-		// multiple -exec
-		{"find multiple execs", "find . -name '*.go' -exec wc -l {} \\; -exec head -1 {} \\;", "find"},
-
-		// -exec after many find flags
-		{"find complex then exec", "find . -maxdepth 3 -type f -name '*.go' -not -path '*/vendor/*' -exec cat {} \\;", "find"},
+		// -exec with safe commands and no `{}` placeholder runs once
+		// per match with no argument substitution; the validator can
+		// model that and allow.
+		{"find exec true", "find . -name '*.go' -exec true \\;", "find"},
+		{"find exec git status no placeholder", "find . -name '*.go' -exec git status \\;", "find"},
 	}
 
 	for _, tt := range tests {
@@ -93,6 +78,36 @@ func TestFindUnsafe(t *testing.T) {
 		// argv boundary — single quoted argv element with embedded
 		// space must not be reassembled as two argv elements.
 		{"find exec quoted command with space", `find . -exec 'git status' {} \;`},
+
+		// `{}` is replaced with each matched path at runtime; the
+		// validator cannot model the substituted path, so any inner
+		// command that uses `{}` must ask even if it looks read-only.
+		{"find exec wc placeholder", "find . -name '*.go' -exec wc -l {} \\;"},
+		{"find exec git diff placeholder", "find . -name '*.go' -exec git diff {} \\;"},
+		{"find exec echo placeholder", "find . -type f -exec echo {} \\;"},
+		{"find exec cat placeholder", "find . -name 'README*' -exec cat {} \\;"},
+		{"find exec head placeholder", "find . -name '*.log' -exec head -20 {} \\;"},
+		{"find exec grep placeholder", "find . -name '*.py' -exec grep -l TODO {} \\;"},
+		{"find exec batch placeholder", "find . -name '*.go' -exec wc -l {} +"},
+		{"find multiple execs placeholder", "find . -name '*.go' -exec wc -l {} \\; -exec head -1 {} \\;"},
+		{"find complex then exec placeholder", "find . -maxdepth 3 -type f -name '*.go' -not -path '*/vendor/*' -exec cat {} \\;"},
+
+		// -execdir / -okdir change cwd to the matched file's directory;
+		// the validator can't model the changed cwd so they always ask.
+		{"find execdir grep", "find . -name '*.py' -execdir grep TODO {} +"},
+		{"find execdir cat", "find . -name '*.md' -execdir cat {} \\;"},
+		{"find execdir safe cmd no placeholder", "find . -execdir true \\;"},
+
+		// File-output actions that open their next arg for writing.
+		{"find fprint outside repo", "find . -maxdepth 0 -fprint /tmp/log"},
+		{"find fprint home", "find . -fprint ~/.bashrc"},
+		{"find fprint0 outside repo", "find . -fprint0 /tmp/null-list"},
+		{"find fprintf outside repo", "find . -fprintf /tmp/out '%p\\n'"},
+		{"find fls outside repo", "find . -fls /tmp/listing"},
+
+		// Non-literal find arg can expand into a dangerous predicate
+		// at runtime (e.g. -delete via $(printf ...)).
+		{"find with non-literal arg expanding to -delete", `find . $(printf %s -delete)`},
 	}
 
 	for _, tt := range tests {
@@ -111,10 +126,10 @@ func TestFindXargsNested(t *testing.T) {
 		assert.Equal(t, "allow", r.decision)
 	})
 
-	t.Run("find exec xargs exec safe", func(t *testing.T) {
+	t.Run("find exec with placeholder asks", func(t *testing.T) {
 		r := evaluateAll(`find . -name '*.txt' -exec xargs -0 cat {} \;`)
 		require.NotNil(t, r)
-		assert.Equal(t, "allow", r.decision)
+		assert.Equal(t, "ask", r.decision)
 	})
 
 	t.Run("find exec xargs exec unsafe", func(t *testing.T) {
@@ -123,10 +138,10 @@ func TestFindXargsNested(t *testing.T) {
 		assert.Equal(t, "ask", r.decision)
 	})
 
-	t.Run("nested find xargs find xargs safe", func(t *testing.T) {
+	t.Run("nested find xargs with placeholder asks", func(t *testing.T) {
 		r := evaluateAll(`find . -name Makefile -exec xargs -I {} find {} -name '*.o' -exec xargs cat {} \; \;`)
 		require.NotNil(t, r)
-		assert.Equal(t, "allow", r.decision)
+		assert.Equal(t, "ask", r.decision)
 	})
 
 	t.Run("nested find xargs find xargs unsafe at leaf", func(t *testing.T) {
