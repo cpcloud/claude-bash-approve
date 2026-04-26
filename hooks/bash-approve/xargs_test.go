@@ -70,6 +70,12 @@ func TestXargsUnsafe(t *testing.T) {
 		// all xargs flags consumed, then dangerous command
 		{"xargs many flags then rm", "xargs -0 -r -n 1 -P 4 rm"},
 		{"xargs long flags then rm", "xargs --null --no-run-if-empty --max-args=1 rm"},
+
+		// quoted/escaped command names — wordLiteral decoding makes
+		// these resolve to the same dangerous tool the shell would invoke.
+		{"xargs single-quoted rm", "xargs 'rm'"},
+		{"xargs ANSI-C-quoted rm", `xargs $'rm'`},
+		{"xargs backslash rm", `xargs \rm`},
 	}
 
 	for _, tt := range tests {

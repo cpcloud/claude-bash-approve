@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v4"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -206,15 +207,27 @@ func buildPiErrorOutput(code, message string) PiOutput {
 	}
 }
 
-// argsText prints CallExpr args to a flat string for regex matching.
+// argsText flattens CallExpr args to a string for regex matching. Each word is
+// decoded as the shell would (quote stripping, backslash escapes, ANSI-C
+// $'...'); words with dynamic parts (CmdSubst, ParamExp) fall back to the
+// printed source so substitution-aware logic still sees them.
 func argsText(args []*syntax.Word) string {
 	parts := make([]string, 0, len(args))
 	for _, w := range args {
-		var buf bytes.Buffer
-		_ = shPrinter.Print(&buf, w)
-		parts = append(parts, buf.String())
+		parts = append(parts, wordMatchText(w))
 	}
 	return strings.Join(parts, " ")
+}
+
+// wordMatchText returns the shell-decoded literal of a word, or the printed
+// source when the word contains dynamic expansions.
+func wordMatchText(w *syntax.Word) string {
+	if decoded, ok := wordDecodedLiteral(w); ok {
+		return decoded
+	}
+	var buf bytes.Buffer
+	_ = shPrinter.Print(&buf, w)
+	return buf.String()
 }
 
 func stripWrappers(cmd string, wrapperPats []pattern) (string, []string) {
@@ -528,28 +541,85 @@ func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.A
 	return &result{reason: reason, decision: matched.decision, denyReason: matched.denyReason}
 }
 
-// wordLiteral returns the literal string value of a word if it contains no
-// expansions (parameter expansion, command substitution, etc.). Returns ""
-// if the word is dynamic.
+// wordLiteral returns the shell-decoded literal value of a word, or "" if the
+// word contains dynamic expansions (parameter expansion, command substitution,
+// arithmetic). It strips unquoted backslash escapes, decodes ANSI-C $'...'
+// sequences, and unwraps single and double quotes — matching what the shell
+// would produce in argv.
 func wordLiteral(w *syntax.Word) string {
+	s, ok := wordDecodedLiteral(w)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// wordDecodedLiteral returns the shell-decoded literal of a word. ok is false
+// when the word contains parts that can't be decoded statically (CmdSubst,
+// ParamExp, ArithmExp), in which case s is the empty string.
+func wordDecodedLiteral(w *syntax.Word) (s string, ok bool) {
+	if w == nil {
+		return "", true
+	}
 	var sb strings.Builder
 	for _, part := range w.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			sb.WriteString(p.Value)
+			sb.WriteString(stripUnquotedBackslashes(p.Value))
 		case *syntax.SglQuoted:
-			sb.WriteString(p.Value)
-		case *syntax.DblQuoted:
-			for _, dp := range p.Parts {
-				if lit, ok := dp.(*syntax.Lit); ok {
-					sb.WriteString(lit.Value)
-				} else {
-					return ""
+			if p.Dollar {
+				decoded, err := expand.Literal(nil, &syntax.Word{Parts: []syntax.WordPart{p}})
+				if err != nil {
+					return "", false
 				}
+				sb.WriteString(decoded)
+			} else {
+				sb.WriteString(p.Value)
 			}
+		case *syntax.DblQuoted:
+			if !dblQuotedDecodable(p) {
+				return "", false
+			}
+			decoded, err := expand.Literal(nil, &syntax.Word{Parts: []syntax.WordPart{p}})
+			if err != nil {
+				return "", false
+			}
+			sb.WriteString(decoded)
 		default:
-			return ""
+			return "", false
 		}
+	}
+	return sb.String(), true
+}
+
+// dblQuotedDecodable reports whether all parts inside a *syntax.DblQuoted
+// node can be resolved statically: only Lit (text with backslash escapes).
+// ParamExp and ArithmExp would be evaluated against an empty environment
+// by expand.Literal, silently producing matches based on default values
+// instead of the real runtime — so we fall back to the printed source.
+func dblQuotedDecodable(d *syntax.DblQuoted) bool {
+	for _, part := range d.Parts {
+		if _, ok := part.(*syntax.Lit); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// stripUnquotedBackslashes drops backslash escapes from an unquoted shell
+// literal: "\X" becomes "X". The mvdan/sh parser already removes line
+// continuations, so we don't need to handle "\<newline>" here.
+func stripUnquotedBackslashes(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		sb.WriteByte(s[i])
 	}
 	return sb.String()
 }

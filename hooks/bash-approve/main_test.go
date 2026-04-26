@@ -1196,6 +1196,77 @@ func TestNoOpinionDecision(t *testing.T) {
 		assert.Nil(t, r, "plain rm should be no-opinion, not denied")
 	})
 
+	// Quoting bypasses: shell decodes these to `rm -rf ...` at runtime,
+	// so the matcher must too.
+	t.Run("rm with single-quoted flag denied", func(t *testing.T) {
+		r := evaluateAll("rm '-rf' /tmp/stuff")
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+		assert.Contains(t, r.denyReason, "rm -r is banned")
+	})
+
+	t.Run("rm with double-quoted flag denied", func(t *testing.T) {
+		r := evaluateAll(`rm "-rf" /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with ANSI-C-quoted flag denied", func(t *testing.T) {
+		r := evaluateAll(`rm $'-rf' /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with ANSI-C escape sequence in flag denied", func(t *testing.T) {
+		// $'\x2drf' decodes to -rf
+		r := evaluateAll(`rm $'\x2drf' /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("backslash-escaped rm with -rf denied", func(t *testing.T) {
+		r := evaluateAll(`\rm -rf /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("single-quoted rm command with -rf denied", func(t *testing.T) {
+		r := evaluateAll(`'rm' -rf /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("ANSI-C-quoted rm command with -rf denied", func(t *testing.T) {
+		r := evaluateAll(`$'rm' -rf /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("concatenated rm with quoted suffix denied", func(t *testing.T) {
+		// r'm' decodes to rm
+		r := evaluateAll(`r'm' -rf /tmp/stuff`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("rm with param-exp default in double quotes stays no-opinion", func(t *testing.T) {
+		// "${RM_FLAGS:--rf}" must not decode to "-rf" against an empty
+		// env — the runtime value is unknown, so the matcher should
+		// fall back to the printed source and produce no opinion.
+		r := evaluateAll(`rm "${RM_FLAGS:--rf}" /tmp/stuff`)
+		assert.Nil(t, r, "param-exp default inside double quotes should not trigger rm -r deny")
+	})
+
+	t.Run("rm with bare param-exp in double quotes stays no-opinion", func(t *testing.T) {
+		r := evaluateAll(`rm "$RM_FLAGS" /tmp/stuff`)
+		assert.Nil(t, r, "bare param-exp inside double quotes should not trigger rm -r deny")
+	})
+
+	t.Run("rm with arithmetic exp in double quotes stays no-opinion", func(t *testing.T) {
+		r := evaluateAll(`rm "$((1))" /tmp/stuff`)
+		assert.Nil(t, r, "arithmetic exp inside double quotes should not trigger rm -r deny")
+	})
+
 	t.Run("chain safe && rm -rf denied", func(t *testing.T) {
 		r := evaluateAll("git status && rm -rf /")
 		require.NotNil(t, r)
