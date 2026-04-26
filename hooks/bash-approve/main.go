@@ -81,6 +81,13 @@ type result struct {
 
 type evalContext struct {
 	cwd string
+	// wrapperPats and commandPats carry the config-filtered pattern
+	// lists through nested evaluation (find -exec, xargs, awk system).
+	// evaluate() seeds them on every call so they are always populated;
+	// nested validators must use ctx.wrapperPats/ctx.commandPats instead
+	// of wrapperPatterns()/commandPatterns() to honor disabled categories.
+	wrapperPats []pattern
+	commandPats []pattern
 }
 
 func approved(reason string) *result { return &result{reason: reason, decision: decisionAllow} }
@@ -262,15 +269,25 @@ func hasNonCmdSubstWhitespace(w *syntax.Word) bool {
 	return false
 }
 
-func stripWrappers(cmd string, wrapperPats []pattern) (string, []string) {
-	var wrappers []string
+// wrapperMatch records both the matched pattern and the matched text for a
+// single wrapper hit, so wrapper validators can inspect the prefix bash
+// would actually evaluate (e.g. the env-vars wrapper validator needs the
+// raw `KEY=val ` text to extract names).
+type wrapperMatch struct {
+	pattern *pattern
+	text    string
+}
+
+func stripWrappers(cmd string, wrapperPats []pattern) (string, []wrapperMatch) {
+	var wrappers []wrapperMatch
 	changed := true
 	for changed {
 		changed = false
-		for _, wp := range wrapperPats {
+		for i := range wrapperPats {
+			wp := &wrapperPats[i]
 			loc := wp.re.FindStringIndex(cmd)
 			if loc != nil && loc[0] == 0 {
-				wrappers = append(wrappers, wp.label())
+				wrappers = append(wrappers, wrapperMatch{pattern: wp, text: cmd[:loc[1]]})
 				cmd = cmd[loc[1]:]
 				changed = true
 				break
@@ -357,6 +374,7 @@ func decisionRank(d string) int {
 // evaluateStmt evaluates a single statement from the AST.
 // Returns nil if rejected.
 func evaluateStmt(stmt *syntax.Stmt, ctx evalContext, wrapperPats, commandPats []pattern) *result {
+	var redirOverrides []*result
 	for _, redir := range stmt.Redirs {
 		if redir.Word != nil {
 			if r, prop := substitutionPropagate(redir.Word, ctx, wrapperPats, commandPats); prop {
@@ -368,13 +386,23 @@ func evaluateStmt(stmt *syntax.Stmt, ctx evalContext, wrapperPats, commandPats [
 				return r
 			}
 		}
+		if r := validateRedirect(redir, ctx); r != nil {
+			redirOverrides = append(redirOverrides, r)
+		}
 	}
 
 	if stmt.Cmd == nil {
 		return nil
 	}
 
-	return evaluateCommand(stmt.Cmd, ctx, wrapperPats, commandPats)
+	cmdR := evaluateCommand(stmt.Cmd, ctx, wrapperPats, commandPats)
+	if cmdR == nil {
+		return nil
+	}
+	if len(redirOverrides) > 0 {
+		cmdR.decision, cmdR.denyReason = mergeAllDecisions(cmdR.decision, cmdR.denyReason, redirOverrides)
+	}
+	return cmdR
 }
 
 // substitutionPropagate adapts checkSubstitutions for callers that follow
@@ -402,7 +430,7 @@ func evaluateCommand(cmd syntax.Command, ctx evalContext, wrapperPats, commandPa
 		return evaluateCallExpr(c, ctx, wrapperPats, commandPats)
 	case *syntax.DeclClause:
 		// export, declare, local, readonly, typeset
-		return approved("shell vars")
+		return evaluateDeclClause(c, ctx, wrapperPats, commandPats)
 	case *syntax.ForClause:
 		if r, prop := checkForLoop(c.Loop, ctx, wrapperPats, commandPats); prop {
 			return r
@@ -480,9 +508,11 @@ func evaluateBlock(stmts []*syntax.Stmt, ctx evalContext, wrapperPats, commandPa
 	return r
 }
 
-// evaluateIfClause checks all branches of an if/elif/else.
+// evaluateIfClause checks all branches of an if/elif/else. Cond, then,
+// and else decisions all merge with severity priority so a deny/ask in
+// any branch surfaces in the result instead of being hidden by an
+// allowed then.
 func evaluateIfClause(ic *syntax.IfClause, ctx evalContext, wrapperPats, commandPats []pattern) *result {
-	// Check condition statements
 	for _, stmt := range ic.Cond {
 		r := evaluateStmt(stmt, ctx, wrapperPats, commandPats)
 		if r == nil {
@@ -492,19 +522,43 @@ func evaluateIfClause(ic *syntax.IfClause, ctx evalContext, wrapperPats, command
 			return r
 		}
 	}
-	// Check then body
-	r := evaluateBlock(ic.Then, ctx, wrapperPats, commandPats, "if")
-	if r == nil {
+	thenR := evaluateBlock(ic.Then, ctx, wrapperPats, commandPats, "if")
+	if thenR == nil {
 		return nil
 	}
-	// Check else/elif
 	if ic.Else != nil {
 		elseR := evaluateCommand(ic.Else, ctx, wrapperPats, commandPats)
 		if elseR == nil {
 			return nil
 		}
+		thenR.decision, thenR.denyReason = mergeAllDecisions(thenR.decision, thenR.denyReason, []*result{elseR})
 	}
-	return r
+	return thenR
+}
+
+// evaluateDeclClause validates `export`, `declare`, `local`, `readonly`,
+// `typeset` (mvdan does not parse `unset` as a DeclClause). Variable
+// names go through validateEnvVarNames so hard-deny vars (LD_PRELOAD,
+// BASH_ENV, ...) and ask-exact vars (PATH, NODE_OPTIONS, ...) surface
+// their decisions instead of getting blanket approval. Substitutions in
+// any assignment value (e.g. `export FOO=$(rm -rf /)`) are checked
+// separately via the standard substitutionPropagate path.
+func evaluateDeclClause(c *syntax.DeclClause, ctx evalContext, wrapperPats, commandPats []pattern) *result {
+	if r, prop := substitutionPropagate(c, ctx, wrapperPats, commandPats); prop {
+		return r
+	}
+	names := make([]string, 0, len(c.Args))
+	for _, a := range c.Args {
+		if a.Name != nil {
+			names = append(names, a.Name.Value)
+		}
+	}
+	out := approved("shell vars")
+	if r := validateEnvVarNames(names, ctx); r != nil {
+		out.decision = r.decision
+		out.denyReason = r.denyReason
+	}
+	return out
 }
 
 // checkForLoop validates the iteration/condition of a for loop.
@@ -560,12 +614,26 @@ func evaluateBinaryCmd(bc *syntax.BinaryCmd, ctx evalContext, wrapperPats, comma
 
 // evaluateCallExpr handles simple commands (the most common case).
 func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, commandPats []pattern) *result {
-	// Standalone variable assignment: FOO=bar (no command)
+	// Standalone variable assignment: FOO=bar (no command). Run the same
+	// hard-deny / ask-exact validation as command-leading assignments so
+	// `LD_PRELOAD=/x; cat foo` surfaces the deny instead of the chain
+	// merging an allowed `cat` past a poisoned env-var assignment.
 	if len(call.Args) == 0 && len(call.Assigns) > 0 {
 		if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
 			return r
 		}
-		return approved("var assignment")
+		names := make([]string, 0, len(call.Assigns))
+		for _, a := range call.Assigns {
+			if a.Name != nil {
+				names = append(names, a.Name.Value)
+			}
+		}
+		out := approved("var assignment")
+		if r := validateEnvVarNames(names, ctx); r != nil {
+			out.decision = r.decision
+			out.denyReason = r.denyReason
+		}
+		return out
 	}
 
 	if len(call.Args) == 0 {
@@ -614,6 +682,16 @@ func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, comma
 // matchAndBuild strips wrappers, matches the command, and builds the result.
 // cmdText is the primary command text. extraArgs are appended if non-nil.
 // astArgs are the raw AST arguments passed to pattern validators.
+//
+// Multiple decision sources can override the matched pattern's baseline:
+//   - the per-pattern argsValidator (false downgrades to validateFallback)
+//   - each wrapper's validateWrapper (returns *result to override)
+//   - validateEnvVarNames over call.Assigns (handles command-leading
+//     `LD_PRELOAD=/x cat foo` even when the env-vars wrapper regex did
+//     not match because another wrapper sat in front)
+//
+// All overrides merge with the matched decision via mergeAllDecisions
+// (deny > ask > "" > allow).
 func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.Assign, astArgs []*syntax.Word, ctx evalContext, wrapperPats, commandPats []pattern) *result {
 	if len(extraArgs) > 0 {
 		cmdText += " " + argsText(extraArgs)
@@ -623,18 +701,57 @@ func matchAndBuild(cmdText string, extraArgs []*syntax.Word, assigns []*syntax.A
 	if matched == nil {
 		return nil
 	}
-	// Run post-match validator if present; false downgrades to "ask".
+	var overrides []*result
 	if matched.validate != nil && !matched.validate(astArgs, ctx) {
-		return &result{reason: matched.label(), decision: matched.validateFallback}
+		overrides = append(overrides, &result{decision: matched.validateFallback})
 	}
-	if len(assigns) > 0 && !slices.Contains(wrappers, tagEnvVars) {
-		wrappers = append([]string{tagEnvVars}, wrappers...)
+	for _, wm := range wrappers {
+		if wm.pattern.validateWrapper == nil {
+			continue
+		}
+		if r := wm.pattern.validateWrapper(wm.text, ctx); r != nil {
+			overrides = append(overrides, r)
+		}
+	}
+	if len(assigns) > 0 {
+		names := make([]string, 0, len(assigns))
+		for _, a := range assigns {
+			if a.Name != nil {
+				names = append(names, a.Name.Value)
+			}
+		}
+		if r := validateEnvVarNames(names, ctx); r != nil {
+			overrides = append(overrides, r)
+		}
+	}
+	wrapperLabels := make([]string, 0, len(wrappers))
+	for _, wm := range wrappers {
+		wrapperLabels = append(wrapperLabels, wm.pattern.label())
+	}
+	if len(assigns) > 0 && !slices.Contains(wrapperLabels, tagEnvVars) {
+		wrapperLabels = append([]string{tagEnvVars}, wrapperLabels...)
 	}
 	reason := matched.label()
-	if len(wrappers) > 0 {
-		reason = strings.Join(wrappers, "+") + "+" + reason
+	if len(wrapperLabels) > 0 {
+		reason = strings.Join(wrapperLabels, "+") + "+" + reason
 	}
-	return &result{reason: reason, decision: matched.decision, denyReason: matched.denyReason}
+	finalDecision, finalDenyReason := mergeAllDecisions(matched.decision, matched.denyReason, overrides)
+	return &result{reason: reason, decision: finalDecision, denyReason: finalDenyReason}
+}
+
+// mergeAllDecisions combines the matched pattern's baseline decision with
+// any number of validator overrides using priority deny > ask > "" >
+// allow. Strict `>` means the matched pattern's denyReason wins on ties.
+func mergeAllDecisions(matchedDecision, matchedDenyReason string, overrides []*result) (string, string) {
+	worstDecision := matchedDecision
+	worstDenyReason := matchedDenyReason
+	for _, o := range overrides {
+		if decisionRank(o.decision) > decisionRank(worstDecision) {
+			worstDecision = o.decision
+			worstDenyReason = o.denyReason
+		}
+	}
+	return worstDecision, worstDenyReason
 }
 
 // wordLiteral returns the shell-decoded literal value of a word, or "" if the
@@ -648,6 +765,138 @@ func wordLiteral(w *syntax.Word) string {
 		return ""
 	}
 	return s
+}
+
+// wordLiteralPath is wordLiteral plus a tilde guard: bash expands a
+// leading unquoted `~` / `~user` to $HOME / a user's homedir at runtime,
+// so the validator must ask instead of comparing the literal text against
+// the repo. Use this for redirect / tee / similar path validators.
+func wordLiteralPath(w *syntax.Word) string {
+	if w != nil && len(w.Parts) > 0 {
+		if lit, ok := w.Parts[0].(*syntax.Lit); ok && hasUnquotedTildePrefix(lit.Value) {
+			return ""
+		}
+	}
+	return wordLiteral(w)
+}
+
+// hasUnquotedTildePrefix reports whether s starts with `~` (no
+// backslash-escape) — `~`, `~/...`, `~user`, `~user/...`, `~+`, and
+// `~-` all expand at runtime to $HOME / oldpwd / cwd / a user's homedir,
+// none of which the validator can statically prove.
+func hasUnquotedTildePrefix(s string) bool {
+	return strings.HasPrefix(s, "~")
+}
+
+// hasUnquotedGlob reports whether the word contains an unescaped glob
+// metacharacter (`*`, `?`, `[`) in an unquoted Lit part. Bash expands
+// these before the redirect, so an unquoted `out*` could resolve to a
+// different file (potentially a symlink leaving the repo) than the
+// literal text suggests. Quoted `'*'` / `"*"` and backslash-escaped
+// metacharacters (`out\*`) stay literal and do not trigger this guard.
+func hasUnquotedGlob(w *syntax.Word) bool {
+	for _, part := range w.Parts {
+		if lit, ok := part.(*syntax.Lit); ok {
+			if litHasUnescapedGlob(lit.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// litHasUnescapedGlob walks s and returns true on the first glob
+// metacharacter not preceded by a backslash. mvdan keeps the backslash
+// in Lit.Value for unquoted backslash escapes, so the scan is sufficient.
+func litHasUnescapedGlob(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' && i+1 < len(s) {
+			i++
+			continue
+		}
+		if c == '*' || c == '?' || c == '[' {
+			return true
+		}
+	}
+	return false
+}
+
+// safeRedirectDevices are device targets where a write redirect is
+// harmless — these are pseudo-devices, not real files.
+var safeRedirectDevices = map[string]bool{
+	"/dev/null":   true,
+	"/dev/stdout": true,
+	"/dev/stderr": true,
+	"/dev/tty":    true,
+}
+
+// validateRedirect inspects a redirect operator/target and asks when a
+// write/append redirect would clobber a file outside the current repo.
+// Read redirects (`<`, heredoc, here-string) and fd-duplications (`<&N`,
+// `>&N`, `>&-`) do not write a file path and pass through. The bare
+// `>&FILE` form is handled specially: bash treats it as a write redirect
+// (equivalent to `&>FILE`) when the target is not a number or `-`.
+// Non-literal write targets (variable, substitution) and unquoted glob
+// patterns drop to ask defensively because we cannot statically prove
+// where the bytes land.
+func validateRedirect(redir *syntax.Redirect, ctx evalContext) *result {
+	if !isWriteRedirect(redir.Op) && !isDplOutWriteToFile(redir) {
+		return nil
+	}
+	if redir.Word == nil {
+		return nil
+	}
+	if hasUnquotedGlob(redir.Word) {
+		return &result{decision: decisionAsk}
+	}
+	target := wordLiteralPath(redir.Word)
+	if target == "" {
+		return &result{decision: decisionAsk}
+	}
+	if safeRedirectDevices[target] {
+		return nil
+	}
+	if !teeTargetInRepo(ctx.cwd, target) {
+		return &result{decision: decisionAsk}
+	}
+	return nil
+}
+
+// isDplOutWriteToFile reports whether `>&` (DplOut) is being used as the
+// bare write-to-file form (equivalent to `&>file`) rather than fd
+// duplication. `>&N` (number) and `>&-` (close) are fd-dup; anything
+// else is a filename.
+func isDplOutWriteToFile(redir *syntax.Redirect) bool {
+	if redir.Op != syntax.DplOut || redir.Word == nil {
+		return false
+	}
+	target := wordLiteral(redir.Word)
+	if target == "" {
+		// Dynamic word: defensively treat as a write redirect so the
+		// caller can ask.
+		return true
+	}
+	if target == "-" {
+		return false
+	}
+	for i := 0; i < len(target); i++ {
+		if target[i] < '0' || target[i] > '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// isWriteRedirect reports whether the operator opens or modifies a file.
+// `<>` (RdrInOut) is included because it opens for read+write.
+func isWriteRedirect(op syntax.RedirOperator) bool {
+	switch op {
+	case syntax.RdrOut, syntax.AppOut, syntax.ClbOut,
+		syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+		return true
+	}
+	return false
 }
 
 // wordDecodedLiteral returns the shell-decoded literal of a word. ok is false
@@ -1024,6 +1273,8 @@ func evaluate(cmd string, ctx evalContext, wrapperPats []pattern, commandPats []
 		return nil
 	}
 
+	ctx.wrapperPats = wrapperPats
+	ctx.commandPats = commandPats
 	return mergeStmtResults(file.Stmts, ctx, wrapperPats, commandPats)
 }
 

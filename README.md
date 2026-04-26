@@ -201,13 +201,13 @@ To override a default, add the specific command name to `enabled` or `disabled`.
 
 | Group | Names |
 |-------|-------|
-| wrapper | `timeout`, `nice`, `env`, `env vars`, `.venv`, `bundle exec`, `rtk proxy`, `command`, `node_modules/.bin`, `absolute path` |
+| wrapper | `timeout`, `nice`, `env`, `env vars` (validates names against allowlist), `.venv`, `bundle exec`, `rtk proxy`, `command`, `node_modules/.bin`, `absolute path` (validates path prefix) |
 | git | `git read op`, `git write op`, `git push`, `git tag`, `git destructive` (`git stash`, `git revert`, `git reset --hard`, `git checkout .`, `git clean -f`) |
 | jj | `jj read op`, `jj write op`, `jj git push` |
 | python | `pytest`, `python`, `ruff`, `uv`, `uvx` |
 | node | `npm`, `npx`, `node -e`, `bun`, `bunx`, `vitest` |
 | rust | `cargo`, `maturin` |
-| shell | `read-only`, `touch`, `mkdir`, `cp -n`, `ln -s`, `shell builtin`, `shell vars`, `process mgmt`, `eval`, `echo`, `cd`, `source`, `sleep`, `var assignment`, `shell destructive` (`rm -r`) |
+| shell | `read-only`, `sed` (denies in-place), `awk` (denies system/pipe/redirect), `tee` (in-repo only), `touch`, `mkdir`, `cp -n`, `ln -s`, `shell builtin`, `shell vars`, `process mgmt`, `eval`, `echo`, `cd`, `source`, `sleep`, `var assignment`, `shell destructive` (`rm -r`) |
 | go | `go`, `go mod vendor`, `go mod init`, `golangci-lint`, `ginkgo` |
 | gh | `gh read op`, `gh pr create`, `gh write op`, `gh api` |
 | kubectl | `kubectl read op`, `kubectl write op`, `kubectl port-forward`, `kubectl exec`, `kubectl cp` |

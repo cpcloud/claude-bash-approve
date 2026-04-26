@@ -15,6 +15,13 @@ import (
 // keep the matched decision, false to downgrade to no opinion.
 type argsValidator func(args []*syntax.Word, ctx evalContext) bool
 
+// wrapperValidator runs after a wrapper regex matches; it inspects the
+// matched prefix text and returns a *result to override the wrapper's
+// default approve, or nil to keep the wrapper's existing decision.
+// Three-state output (deny/ask/allow) is needed by the env-vars wrapper,
+// which has hard-deny names alongside ask-only names.
+type wrapperValidator func(matchedPrefix string, ctx evalContext) *result
+
 type pattern struct {
 	re               *regexp.Regexp
 	tags             []string
@@ -22,6 +29,7 @@ type pattern struct {
 	denyReason       string
 	validate         argsValidator
 	validateFallback string
+	validateWrapper  wrapperValidator
 }
 
 // label returns the first tag, used in approval reason strings.
@@ -57,6 +65,14 @@ func WithValidatorFallback(decision string) patternOption {
 	}
 }
 
+// WithWrapperValidator attaches a wrapper validator that inspects the
+// matched prefix text after a wrapper regex matches.
+func WithWrapperValidator(v wrapperValidator) patternOption {
+	return func(p *pattern) {
+		p.validateWrapper = v
+	}
+}
+
 func tags(t ...string) []string { return t }
 
 func NewPattern(re string, t []string, opts ...patternOption) pattern {
@@ -77,14 +93,14 @@ func wrapperPatterns() []pattern {
 		NewPattern(`^timeout\s+\d+\s+`, tags("timeout", "wrapper")),
 		NewPattern(`^nice\s+(-n\s*\d+\s+)?`, tags("nice", "wrapper")),
 		NewPattern(`^env\s+`, tags("env", "wrapper")),
-		NewPattern(`^([A-Z_][A-Z0-9_]*=[^\s]*\s+)+`, tags("env vars", "wrapper")),
+		NewPattern(`^([A-Z_][A-Z0-9_]*=[^\s]*\s+)+`, tags("env vars", "wrapper"), WithWrapperValidator(isSafeEnvVarsWrapper)),
 		NewPattern(`^(\.\./)*\.?venv/bin/`, tags(".venv", "wrapper")),
 		NewPattern(`^/[^\s]+/\.?venv/bin/`, tags(".venv", "wrapper")),
 		NewPattern(`^bundle\s+exec\s+`, tags("bundle exec", "wrapper")),
 		NewPattern(`^rtk\s+proxy\s+`, tags("rtk proxy", "wrapper")),
 		NewPattern(`^command\s+`, tags("command", "wrapper")),
 		NewPattern(`^(\.\./)*node_modules/\.bin/`, tags("node_modules/.bin", "wrapper")),
-		NewPattern(`^/[^\s]+/`, tags("absolute path", "wrapper")),
+		NewPattern(`^/[^\s]+/`, tags("absolute path", "wrapper"), WithWrapperValidator(isSafeAbsolutePath)),
 	}
 }
 
@@ -146,7 +162,10 @@ func commandPatterns() []pattern {
 		// shell
 		NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
 			WithDenyReason("BLOCKED: rm -r is banned. Remove specific files only, not entire directory trees.")),
-		NewPattern(`^(ls|cat|head|tail|wc|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|awk|sed|xxd|od|hexdump|sqlite3|tee|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
+		NewPattern(`^(ls|cat|head|tail|wc|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|xxd|od|hexdump|sqlite3|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
+		NewPattern(`^sed\b`, tags("sed", "shell"), WithValidator(isSedSafe)),
+		NewPattern(`^awk\b`, tags("awk", "shell"), WithValidator(isAwkSafe)),
+		NewPattern(`^tee\b`, tags("tee", "shell"), WithValidator(isTeeInRepo)),
 		NewPattern(`^curl\b`, tags("curl", "shell"), WithValidator(isCurlReadOnly)),
 		NewPattern(`^xargs\b`, tags("xargs", "shell"), WithValidator(isXargsSafe)),
 		NewPattern(`^find\b`, tags("find", "shell"), WithValidator(isFindSafe)),
