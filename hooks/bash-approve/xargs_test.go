@@ -26,7 +26,7 @@ func TestXargsSafe(t *testing.T) {
 		// xargs flags before safe commands
 		{"xargs null", "xargs -0 wc -l", "xargs"},
 		{"xargs max-args", "xargs -n 1 cat", "xargs"},
-		{"xargs replace", "xargs -I {} git diff {}", "xargs"},
+		{"xargs attached -I no template", "xargs -I{} true", "xargs"},
 		{"xargs parallel", "xargs -P 4 grep pattern", "xargs"},
 		{"xargs delimiter", "xargs -d '\\n' echo", "xargs"},
 		{"xargs multiple flags", "xargs -0 -n 1 -P 4 grep pattern", "xargs"},
@@ -80,6 +80,24 @@ func TestXargsUnsafe(t *testing.T) {
 		// argv boundary — single quoted argv element with embedded
 		// space must not be reassembled as two argv elements.
 		{"xargs quoted command with space", `xargs 'git status'`},
+
+		// -I/--replace substitutes input into the command template at
+		// runtime, so the validator cannot know what the substituted
+		// value is.
+		{"xargs -I tee placeholder", "xargs -I {} tee {}"},
+		{"xargs -I git diff placeholder", "xargs -I {} git diff {}"},
+		{"xargs --replace tee", "xargs --replace=PH tee PH"},
+		{"xargs -I custom token", "xargs -I PH echo PH"},
+
+		// Default xargs (no -I) appends each input record as
+		// additional positional arguments. For commands not in the
+		// safe-append list, that runtime tail can change the approval
+		// decision.
+		{"xargs touch (write command)", "xargs touch"},
+		{"xargs mkdir (write command)", "xargs mkdir"},
+		{"xargs less (log-file option)", "xargs less"},
+		{"xargs more (option-driven)", "xargs more"},
+		{"xargs yq (in-place option)", "xargs yq"},
 	}
 
 	for _, tt := range tests {

@@ -179,14 +179,13 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"uniq", "uniq -c counts.txt", "read-only"},
 		{"cut", "cut -d: -f1 /etc/passwd", "read-only"},
 		{"tr", "tr '[:upper:]' '[:lower:]'", "read-only"},
-		{"awk", "awk '{print $1}' file", "read-only"},
-		{"sed", "sed 's/foo/bar/g' file", "read-only"},
+		{"awk", "awk '{print $1}' file", "awk"},
+		{"sed", "sed 's/foo/bar/g' file", "sed"},
 		{"xargs echo", "xargs echo", "xargs"},
 		{"xxd", "xxd file.bin", "read-only"},
 		{"od", "od -A x -t x1z file.bin", "read-only"},
 		{"hexdump", "hexdump -C file.bin", "read-only"},
 		{"sqlite3", `sqlite3 foo.db "SELECT * FROM decisions"`, "read-only"},
-		{"tee", "tee /tmp/output.log", "read-only"},
 		{"diff", "diff file1.txt file2.txt", "read-only"},
 		{"stat", "stat -f '%Sm' file.txt", "read-only"},
 		{"realpath", "realpath ../foo", "read-only"},
@@ -645,7 +644,15 @@ func TestStripWrappers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			core, wrappers := stripWrappers(tt.cmd, wrapperPatterns())
 			assert.Equal(t, tt.expectedCmd, core)
-			assert.Equal(t, tt.expectedWrap, wrappers)
+			labels := make([]string, 0, len(wrappers))
+			for _, wm := range wrappers {
+				labels = append(labels, wm.pattern.label())
+			}
+			if len(tt.expectedWrap) == 0 {
+				assert.Empty(t, labels)
+			} else {
+				assert.Equal(t, tt.expectedWrap, labels)
+			}
 		})
 	}
 }

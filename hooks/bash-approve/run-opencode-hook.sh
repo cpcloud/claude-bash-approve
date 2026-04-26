@@ -18,7 +18,7 @@ else
 fi
 
 if [ "$needs_rebuild" = true ]; then
-    if ! (cd "$HOOK_DIR" && go build -o "$BINARY" .) 2>&1 >&2; then
+    if ! (cd "$HOOK_DIR" && go build -o "$BINARY" .) >&2; then
         echo "bash-approve: build failed, falling back to OpenCode ask flow" >&2
         exit 0
     fi
