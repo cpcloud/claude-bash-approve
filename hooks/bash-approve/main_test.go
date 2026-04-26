@@ -1313,6 +1313,48 @@ func TestNoOpinionDecision(t *testing.T) {
 		assert.Nil(t, r, "arithmetic exp inside double quotes should not trigger rm -r deny")
 	})
 
+	// Single-element words with embedded whitespace must not be
+	// joined into the matcher's argv string as if they were multiple
+	// args — that would let `'git status'` (one argv element) approve
+	// as `git status` (two argv) and `rm '-rf /tmp/x'` (one argv)
+	// deny when bash would never run rm with that flag combination.
+	t.Run("single-quoted command with embedded space stays no-opinion", func(t *testing.T) {
+		r := evaluateAll(`'git status'`)
+		assert.Nil(t, r, "single-quoted 'git status' is one argv element bash would error on")
+	})
+
+	t.Run("ANSI-C-quoted command with escaped space stays no-opinion", func(t *testing.T) {
+		r := evaluateAll(`$'git\x20status'`)
+		assert.Nil(t, r, "$'git\\x20status' is one argv element with literal space")
+	})
+
+	t.Run("rm single-quoted flag with path stays no-opinion", func(t *testing.T) {
+		r := evaluateAll(`rm '-rf /tmp/x'`)
+		assert.Nil(t, r, "rm with one quoted argv '-rf /tmp/x' should not trigger deny")
+	})
+
+	t.Run("rm ANSI-C escaped space in flag stays no-opinion", func(t *testing.T) {
+		r := evaluateAll(`rm $'-rf\x20/tmp/x'`)
+		assert.Nil(t, r, "rm with ANSI-C escaped space should not trigger deny")
+	})
+
+	// Top-level CmdSubst is intentionally not subject to the
+	// whitespace fallback — its decoded whitespace is the IFS argv
+	// boundary bash would split on.
+	t.Run("rm with cmd-subst whitespace splits into argv denied", func(t *testing.T) {
+		r := evaluateAll(`rm $(echo -rf /tmp/x)`)
+		require.NotNil(t, r)
+		assert.Equal(t, "deny", r.decision)
+	})
+
+	t.Run("quoted-with-empty-cmd-subst whitespace stays no-opinion", func(t *testing.T) {
+		// 'git status'$(echo) is one argv element. The whitespace came
+		// from the quoted part, not from substitution — must not be
+		// exempt from the argv-boundary fallback.
+		r := evaluateAll(`'git status'$(echo)`)
+		assert.Nil(t, r, "quoted whitespace + cmd-subst must still fall back to printed source")
+	})
+
 	t.Run("rm with echo -e octal escape denied", func(t *testing.T) {
 		// echo -e '\055rf' decodes \055 as octal '-' → output "-rf"
 		r := evaluateAll(`rm $(echo -e '\055rf') /tmp/stuff`)

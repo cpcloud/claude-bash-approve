@@ -221,14 +221,45 @@ func argsText(args []*syntax.Word) string {
 }
 
 // wordMatchText returns the shell-decoded literal of a word, or the printed
-// source when the word contains dynamic expansions.
+// source when the word contains dynamic expansions. Single-element words
+// whose decoded form contains shell whitespace also fall back to the
+// printed source: argsText joins decoded words with spaces, so passing
+// `'git status'` (one argv element with embedded space) through as
+// `git status` would let the matcher mistake it for two argv elements
+// and approve it as a git read op. Whitespace that originates from a
+// top-level CmdSubst is not subject to the fallback, since that
+// whitespace is the IFS argv boundary bash would split on.
 func wordMatchText(w *syntax.Word) string {
 	if decoded, ok := wordDecodedLiteral(w); ok {
-		return decoded
+		if !hasNonCmdSubstWhitespace(w) {
+			return decoded
+		}
 	}
 	var buf bytes.Buffer
 	_ = shPrinter.Print(&buf, w)
 	return buf.String()
+}
+
+// hasNonCmdSubstWhitespace reports whether any part of the word other
+// than a top-level CmdSubst decodes to a string containing shell
+// whitespace. Such whitespace is part of one argv element and would
+// create false word boundaries if joined into the matcher's argv string.
+func hasNonCmdSubstWhitespace(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, part := range w.Parts {
+		if _, ok := part.(*syntax.CmdSubst); ok {
+			continue
+		}
+		single := &syntax.Word{Parts: []syntax.WordPart{part}}
+		if decoded, ok := wordDecodedLiteral(single); ok {
+			if strings.ContainsAny(decoded, " \t\n\r\v\f") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func stripWrappers(cmd string, wrapperPats []pattern) (string, []string) {
