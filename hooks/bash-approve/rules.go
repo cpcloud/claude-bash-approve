@@ -168,6 +168,9 @@ func commandPatterns() []pattern {
 		NewPattern(`^nix-store\s+(-q|--query)\b`, tags("nix-store query", "nix")),
 		NewPattern(`^nh\s+(os|home|darwin)\s+build\b`, tags("nh build", "nh")),
 
+		// pixi
+		NewPattern(`^pixi\s+run\b`, tags("pixi run", "pixi"), WithValidator(isPixiRunSafe)),
+
 		// shell
 		NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
 			WithDenyReason("BLOCKED: rm -r is banned. Remove specific files only, not entire directory trees.")),

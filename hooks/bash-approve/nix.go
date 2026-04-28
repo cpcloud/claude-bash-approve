@@ -17,10 +17,19 @@ import (
 // through the normal pipeline; allow only when the inner command would
 // auto-approve standalone.
 //
+// `--expr EXPR` asks unconditionally. EXPR is uninspected nix code and
+// can run arbitrary code via `builtins.fetchurl`/import-from-derivation
+// during evaluation, before any --command branch even runs.
+//
 // args includes the command name at args[0] and the subcommand at args[1].
 func isNixRunShellSafe(args []*syntax.Word, ctx evalContext) bool {
 	if len(args) < 2 {
 		return true
+	}
+	for i := 2; i < len(args); i++ {
+		if wordLiteral(args[i]) == "--expr" {
+			return false
+		}
 	}
 	sub := wordLiteral(args[1])
 	if sub == "run" {
@@ -58,12 +67,18 @@ func isNixRunShellSafe(args []*syntax.Word, ctx evalContext) bool {
 
 // isNixOldShellSafe validates `nix-shell` invocations. `--run STR` and
 // `--command STR` take a single string parsed as a shell command —
-// recurse via evaluate(). Other flags pass.
+// recurse via evaluate(). `--expr EXPR` asks unconditionally for the
+// same reason as `nix shell --expr`. Other flags pass.
 //
 // args includes the command name at args[0].
 func isNixOldShellSafe(args []*syntax.Word, ctx evalContext) bool {
 	if len(args) < 2 {
 		return true
+	}
+	for i := 1; i < len(args); i++ {
+		if wordLiteral(args[i]) == "--expr" {
+			return false
+		}
 	}
 	for i := 1; i < len(args); i++ {
 		lit := wordLiteral(args[i])
