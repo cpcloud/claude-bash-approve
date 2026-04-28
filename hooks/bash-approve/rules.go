@@ -175,7 +175,7 @@ func commandPatterns() []pattern {
 		// shell
 		NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
 			WithDenyReason("BLOCKED: rm -r is banned. Remove specific files only, not entire directory trees.")),
-		NewPattern(`^(ls|cat|head|tail|wc|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|xxd|od|hexdump|sqlite3|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
+		NewPattern(`^(ls|cat|head|tail|wc|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|xxd|od|hexdump|sqlite3|diff|cmp|comm|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|b2sum|b3sum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq|tac|rev|column|nl|paste|join|expand|unexpand|fold|fmt|strings|bat|bc|dc|expr|dig|host|nslookup|netstat|free|nproc|printenv|groups|pv|xzcat|bzcat|zcat|lsblk)\b`, tags("read-only", "shell")),
 		NewPattern(`^(fd|fdfind)\b`, tags("fd", "shell"), WithValidator(isFdSafe)),
 		NewPattern(`^sed\b`, tags("sed", "shell"), WithValidator(isSedSafe)),
 		NewPattern(`^awk\b`, tags("awk", "shell"), WithValidator(isAwkSafe)),
