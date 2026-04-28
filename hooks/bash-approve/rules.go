@@ -176,6 +176,7 @@ func commandPatterns() []pattern {
 		NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
 			WithDenyReason("BLOCKED: rm -r is banned. Remove specific files only, not entire directory trees.")),
 		NewPattern(`^(ls|cat|head|tail|wc|grep|rg|file|which|pwd|du|df|sort|uniq|cut|tr|xxd|od|hexdump|sqlite3|diff|stat|realpath|basename|dirname|readlink|md5sum|sha256sum|shasum|lsof|ps|pgrep|jq|yq|id|whoami|hostname|uname|date|env|seq)\b`, tags("read-only", "shell")),
+		NewPattern(`^(fd|fdfind)\b`, tags("fd", "shell"), WithValidator(isFdSafe)),
 		NewPattern(`^sed\b`, tags("sed", "shell"), WithValidator(isSedSafe)),
 		NewPattern(`^awk\b`, tags("awk", "shell"), WithValidator(isAwkSafe)),
 		NewPattern(`^tee\b`, tags("tee", "shell"), WithValidator(isTeeInRepo)),
