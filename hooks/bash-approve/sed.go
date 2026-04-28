@@ -63,9 +63,13 @@ func isSedSafe(args []*syntax.Word, ctx evalContext) bool {
 		if path == "" {
 			return false
 		}
-		if !teeTargetInRepo(ctx.cwd, path) {
-			return false
+		if teeTargetInRepo(ctx.cwd, path) {
+			continue
 		}
+		if isSafeWriteTarget(path) {
+			continue
+		}
+		return false
 	}
 	return true
 }

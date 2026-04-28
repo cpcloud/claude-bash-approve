@@ -59,6 +59,10 @@ func TestIsSedSafe(t *testing.T) {
 		{"in-place outside repo absolute", "sed -i 's/foo/bar/' /etc/hosts", evalContext{cwd: repo}, false},
 		{"in-place outside repo relative", "sed -i 's/foo/bar/' ../../etc/hosts", evalContext{cwd: repo}, false},
 
+		// -i targeting a safe scratch prefix: allowed.
+		{"in-place /tmp", "sed -i 's/foo/bar/' /tmp/scratch.txt", evalContext{cwd: repo}, true},
+		{"in-place /var/tmp", "sed -i 's/foo/bar/' /var/tmp/scratch.txt", evalContext{cwd: repo}, true},
+
 		// -i with multiple files: all must be in repo.
 		{"in-place in-repo multiple files", "sed -i 's/x/y/' in.txt in.txt", evalContext{cwd: repo}, true},
 
