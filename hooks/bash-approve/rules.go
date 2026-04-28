@@ -170,6 +170,7 @@ func commandPatterns() []pattern {
 
 		// pixi
 		NewPattern(`^pixi\s+run\b`, tags("pixi run", "pixi"), WithValidator(isPixiRunSafe)),
+		NewPattern(`^pixi\s+(list|tree|search|info|shell-hook|task\s+list|--version|--help)\b`, tags("pixi read", "pixi")),
 
 		// shell
 		NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),

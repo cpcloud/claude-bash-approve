@@ -614,10 +614,11 @@ func evaluateBinaryCmd(bc *syntax.BinaryCmd, ctx evalContext, wrapperPats, comma
 
 // evaluateCallExpr handles simple commands (the most common case).
 func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, commandPats []pattern) *result {
-	// Standalone variable assignment: FOO=bar (no command). Run the same
-	// hard-deny / ask-exact validation as command-leading assignments so
-	// `LD_PRELOAD=/x; cat foo` surfaces the deny instead of the chain
-	// merging an allowed `cat` past a poisoned env-var assignment.
+	// Standalone variable assignment: FOO=bar (no command). Apply only
+	// the dangerous-name guard (hard-deny / ask-exact / LD_-DYLD_) so
+	// `LD_PRELOAD=/x; cat foo` still surfaces the deny, but ordinary
+	// project locals like `hm_src=/path` auto-approve instead of asking
+	// on every unknown name.
 	if len(call.Args) == 0 && len(call.Assigns) > 0 {
 		if r, prop := substitutionPropagate(call, ctx, wrapperPats, commandPats); prop {
 			return r
@@ -629,7 +630,7 @@ func evaluateCallExpr(call *syntax.CallExpr, ctx evalContext, wrapperPats, comma
 			}
 		}
 		out := approved("var assignment")
-		if r := validateEnvVarNames(names, ctx); r != nil {
+		if r := validateStandaloneAssignNames(names); r != nil {
 			out.decision = r.decision
 			out.denyReason = r.denyReason
 		}

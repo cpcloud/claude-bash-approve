@@ -191,6 +191,16 @@ func TestEvaluate_Approved(t *testing.T) {
 		{"nh os build", "nh os build . -- --flake .#falcon", "nh build"},
 		{"nh os build dry", "nh os build .", "nh build"},
 
+		// --- Pixi read-only ---
+		{"pixi list", "pixi list", "pixi read"},
+		{"pixi list manifest", "pixi list --manifest-path .", "pixi read"},
+		{"pixi tree", "pixi tree", "pixi read"},
+		{"pixi search", "pixi search numpy", "pixi read"},
+		{"pixi info", "pixi info", "pixi read"},
+		{"pixi shell-hook", "pixi shell-hook", "pixi read"},
+		{"pixi task list", "pixi task list", "pixi read"},
+		{"pixi --version", "pixi --version", "pixi read"},
+
 		// --- Read-only commands ---
 		{"ls", "ls -la", "read-only"},
 		{"cat file", "cat foo.txt", "read-only"},
