@@ -832,6 +832,61 @@ var safeRedirectDevices = map[string]bool{
 	"/dev/tty":    true,
 }
 
+// safeWritePrefixes are absolute path prefixes where a write redirect
+// auto-approves. System scratch directories where stray writes don't
+// hurt anything important. The lstat check below catches pre-existing
+// symlinks that would escape these prefixes.
+var safeWritePrefixes = []string{
+	"/tmp/",
+	"/var/tmp/",
+}
+
+// isSafeWriteTarget reports whether target is under a safe write
+// prefix. A pre-existing symlink at the target path that resolves
+// outside any safe prefix is refused (mitigates `/tmp/X → /etc/passwd`
+// planted-symlink attacks). Non-existent targets pass: there's no
+// symlink to resolve and the parent is by definition safe.
+//
+// This does not close the same-invocation TOCTOU window where an
+// earlier approved stmt creates the symlink between hook validation
+// and shell execution; that gap exists for in-repo writes too and
+// would have to be closed by validating `ln -s` separately.
+func isSafeWriteTarget(target string) bool {
+	if !filepath.IsAbs(target) {
+		return false
+	}
+	cleaned := filepath.Clean(target)
+	withSlash := cleaned + "/"
+	matched := false
+	for _, p := range safeWritePrefixes {
+		if strings.HasPrefix(withSlash, p) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false
+	}
+	info, err := os.Lstat(cleaned)
+	if err != nil {
+		return true
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return false
+	}
+	resolvedSlash := filepath.Clean(resolved) + "/"
+	for _, p := range safeWritePrefixes {
+		if strings.HasPrefix(resolvedSlash, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateRedirect inspects a redirect operator/target and asks when a
 // write/append redirect would clobber a file outside the current repo.
 // Read redirects (`<`, heredoc, here-string) and fd-duplications (`<&N`,
@@ -856,6 +911,9 @@ func validateRedirect(redir *syntax.Redirect, ctx evalContext) *result {
 		return &result{decision: decisionAsk}
 	}
 	if safeRedirectDevices[target] {
+		return nil
+	}
+	if isSafeWriteTarget(target) {
 		return nil
 	}
 	if !teeTargetInRepo(ctx.cwd, target) {
