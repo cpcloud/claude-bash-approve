@@ -107,7 +107,7 @@ func wrapperPatterns() []pattern {
 func commandPatterns() []pattern {
 	return []pattern{
 		// git
-		NewPattern(`^git\s+(-C\s+\S+\s+)?(diff|log|status|show|branch|stash\s+list|bisect|worktree\s+list|fetch|ls-files|ls-remote|rev-parse|describe|blame|grep|check-ignore|shortlog|name-rev|cat-file)\b`, tags("git read op", "git")),
+		NewPattern(`^git\s+(-C\s+\S+\s+)?(diff|log|status|show|branch|stash\s+list|bisect|worktree\s+list|fetch|ls-files|ls-remote|ls-tree|rev-parse|describe|blame|grep|check-ignore|shortlog|name-rev|cat-file)\b`, tags("git read op", "git")),
 		// git destructive ops — blocked by default (matches before write ops)
 		NewPattern(`^git\s+(-C\s+\S+\s+)?stash\b`, tags("git stash", "git destructive", "git"), WithDecision("deny"),
 			WithDenyReason("BLOCKED: git stash is banned. It destroys work and causes merge conflicts. Make targeted edits instead.")),
@@ -158,6 +158,15 @@ func commandPatterns() []pattern {
 		NewPattern(`^make\b`, tags("make")),
 		NewPattern(`^mise\s+(run|exec|install|use|env|--version|which|search|activate|list|ls|doctor|trust|reshim|settings|lock)\b`, tags("mise")),
 		NewPattern(`^mise\s+approve\b`, tags("mise")),
+
+		// nix / nh
+		NewPattern(`^nix\s+(build|eval|log|path-info|why-depends)\b`, tags("nix")),
+		NewPattern(`^nix\s+(run|shell|develop)\b`, tags("nix"), WithValidator(isNixRunShellSafe)),
+		NewPattern(`^nix\s+flake\s+(show|metadata|info|update|lock|prefetch|archive)\b`, tags("nix flake read", "nix")),
+		NewPattern(`^nix-build\b`, tags("nix-build", "nix")),
+		NewPattern(`^nix-shell\b`, tags("nix-shell", "nix"), WithValidator(isNixOldShellSafe)),
+		NewPattern(`^nix-store\s+(-q|--query)\b`, tags("nix-store query", "nix")),
+		NewPattern(`^nh\s+(os|home|darwin)\s+build\b`, tags("nh build", "nh")),
 
 		// shell
 		NewPattern(`^rm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b`, tags("rm -r", "shell destructive", "shell"), WithDecision("deny"),
